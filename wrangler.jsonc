@@ -7,7 +7,10 @@
 	"name": "travellite",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-10-08",
-	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+	"compatibility_flags": [
+		"nodejs_compat",
+		"global_fetch_strictly_public"
+	],
 	"assets": {
 		"binding": "ASSETS",
 		"directory": "./public"
@@ -18,5 +21,11 @@
 	"ai": {
 		"binding": "AI"
 	},
-	"upload_source_maps": true
+	"upload_source_maps": true,
+	"vectorize": [
+		{
+			"binding": "VECTORIZE",
+			"index_name": "travellite-index"
+		}
+	]
 }
