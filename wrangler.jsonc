@@ -27,5 +27,14 @@
 			"binding": "VECTORIZE",
 			"index_name": "travellite-index"
 		}
-	]
+	],
+	"kv_namespaces": [
+		{
+		  "binding": "KVNAMESPACE",
+		  "id": "cf3cd86650d843d4894a5b86ebec3e8d",
+		  
+		  // Optional: preview_id used when running `wrangler dev` for local dev
+		  "preview_id": "<ID_OF_PREVIEW_KV_NAMESPACE_FOR_LOCAL_DEVELOPMENT>"
+		}
+	  ]
 }
