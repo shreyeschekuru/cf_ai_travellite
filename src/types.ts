@@ -3,15 +3,16 @@
  */
 
 export interface Env {
-	/**
-	 * Binding for the Workers AI API.
-	 */
-	AI: Ai;
 
-	/**
-	 * Binding for static assets.
-	 */
+	AI: Ai;
+	
 	ASSETS: { fetch: (request: Request) => Promise<Response> };
+
+	VECTORIZE: Vectorize;
+	KVNAMESPACE: KVNamespace;
+
+	AMADEUS_API_KEY: string;
+	AMADEUS_API_SECRET: string;
 }
 
 /**
