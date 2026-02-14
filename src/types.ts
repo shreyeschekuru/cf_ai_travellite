@@ -2,12 +2,8 @@
  * Type definitions for the LLM chat application.
  */
 
-export interface Env {
-
-	AI: Ai;
-	
-	ASSETS: { fetch: (request: Request) => Promise<Response> };
-
+export interface Env extends Cloudflare.Env {
+	//AI and ASSETS are inherited from Cloudflare.Env
 	VECTORIZE: Vectorize;
 	KVNAMESPACE: KVNamespace;
 

@@ -32,5 +32,8 @@
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"test": "vitest"
+	},
+	"dependencies": {
+		"agents": "^0.4.1"
 	}
 }
