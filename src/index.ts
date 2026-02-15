@@ -76,6 +76,11 @@ export default {
 			return env.ASSETS.fetch(request);
 		}
 
+		// Gateway WebSocket endpoint for low-latency realtime communication
+		if (url.pathname === "/api/gateway/ws") {
+			return handleGatewayWebSocket(request, env);
+		}
+
 		// API Routes
 		if (url.pathname === "/api/chat") {
 			// Handle POST requests for chat
@@ -91,6 +96,58 @@ export default {
 		return new Response("Not found", { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;
+
+/**
+ * Handles Gateway WebSocket connections for low-latency realtime communication
+ * Routes WebSocket connections to the appropriate TravelAgent instance based on userId
+ */
+async function handleGatewayWebSocket(
+	request: Request,
+	env: Env,
+): Promise<Response> {
+	// Check if this is a WebSocket upgrade request
+	if (request.headers.get("Upgrade") !== "websocket") {
+		return new Response("Expected WebSocket upgrade", { status: 426 });
+	}
+
+	const url = new URL(request.url);
+	
+	// Extract userId from query parameter (e.g., /api/gateway/ws?userId=user123)
+	const userId = url.searchParams.get("userId");
+	
+	if (!userId) {
+		return new Response("Missing userId query parameter", { status: 400 });
+	}
+
+	try {
+		// Get or create TravelAgent instance for this user
+		// Each user gets their own agent instance with persistent state
+		const agentId = env.TravelAgent.idFromName(userId);
+		const stub = env.TravelAgent.get(agentId);
+
+		// Create a new request with PartyServer-required headers
+		const headers = new Headers(request.headers);
+		headers.set("x-partykit-room", userId);
+
+		// Forward the WebSocket upgrade request to the TravelAgent Durable Object
+		// The Durable Object will handle the WebSocket connection and messages
+		const modifiedRequest = new Request(request.url, {
+			method: request.method,
+			headers: headers,
+		});
+
+		return await stub.fetch(modifiedRequest);
+	} catch (error) {
+		console.error("Error handling gateway WebSocket:", error);
+		return new Response(
+			JSON.stringify({ error: "Failed to establish WebSocket connection" }),
+			{
+				status: 500,
+				headers: { "content-type": "application/json" },
+			},
+		);
+	}
+}
 
 /**
  * Handles chat API requests

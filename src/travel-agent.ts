@@ -1,5 +1,10 @@
 import { Agent, callable, type Connection } from "agents";
-import { Env } from "./types";
+import {
+	Env,
+	type GatewayMessage,
+	type GatewayResponse,
+	isGatewayMessage,
+} from "./types";
 
 /**
  * Basic trip information
@@ -125,14 +130,76 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	}
 
 	/**
-	 * Handle incoming messages from clients
+	 * Handle incoming WebSocket messages from clients
+	 * Processes messages and sends responses back through the WebSocket connection
 	 * @param connection The connection that sent the message
-	 * @param message The message payload
+	 * @param message The message payload (typically a JSON string)
 	 */
 	async onMessage(connection: Connection, message: unknown) {
-		// Handle message processing here
-		// You can add custom logic for processing travel-related queries
-		// Messages can be added to recentMessages as needed
+		try {
+			// Parse the incoming message
+			let messageData: GatewayMessage;
+			
+			if (typeof message === "string") {
+				try {
+					const parsed = JSON.parse(message);
+					if (isGatewayMessage(parsed)) {
+						messageData = parsed;
+					} else {
+						// If not a GatewayMessage, treat the entire string as the message text
+						messageData = { type: "message", text: message };
+					}
+				} catch {
+					// If not JSON, treat the entire string as the message text
+					messageData = { type: "message", text: message };
+				}
+			} else if (isGatewayMessage(message)) {
+				messageData = message;
+			} else {
+				// Invalid message format
+				const errorResponse: GatewayResponse = {
+					type: "response",
+					error: "Invalid message format",
+				};
+				connection.send(JSON.stringify(errorResponse));
+				return;
+			}
+
+			// Extract message text
+			const text = messageData.text?.trim() || "";
+			
+			if (!text) {
+				const errorResponse: GatewayResponse = {
+					type: "response",
+					error: "Message text is required",
+				};
+				connection.send(JSON.stringify(errorResponse));
+				return;
+			}
+
+			// Process the message through the agent's handleMessage method
+			// This will handle RAG, tools, and LLM generation
+			const response = await this.handleMessage(text);
+
+			// Send response back through WebSocket connection
+			const successResponse: GatewayResponse = {
+				type: "response",
+				text: response,
+				userId: messageData.userId,
+				timestamp: Date.now(),
+			};
+			connection.send(JSON.stringify(successResponse));
+		} catch (error) {
+			console.error("Error processing WebSocket message:", error);
+			
+			// Send error response back to client
+			const errorResponse: GatewayResponse = {
+				type: "response",
+				error: error instanceof Error ? error.message : "Failed to process message",
+				timestamp: Date.now(),
+			};
+			connection.send(JSON.stringify(errorResponse));
+		}
 	}
 
 	/**
