@@ -4,6 +4,7 @@
 
 export interface Env extends Cloudflare.Env {
 	//AI, ASSETS, TravelAgent, KVNAMESPACE and VECTORIZE are inherited from Cloudflare.Env
+	//RealtimeConnector is inherited from Cloudflare.Env after wrangler types
 
 	AMADEUS_API_KEY: string;
 	AMADEUS_API_SECRET: string;
@@ -11,6 +12,7 @@ export interface Env extends Cloudflare.Env {
 	// Realtime configuration
 	REALTIME_API_TOKEN?: string;
 	REALTIME_NAMESPACE_ID?: string;
+	REALTIME_ACCOUNT_ID?: string;
 }
 
 /**

@@ -40,6 +40,11 @@
 			"name": "TravelAgent",
 			"class_name": "TravelAgent",
 			"script_name": "travellite"
+			},
+			{
+			"name": "RealtimeConnector",
+			"class_name": "RealtimeConnector",
+			"script_name": "travellite"
 			}
 		]
 	},
@@ -47,6 +52,10 @@
 		{
 			"tag": "v1",
 			"new_sqlite_classes": ["TravelAgent"]
-}
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": ["RealtimeConnector"]
+		}
 	]
 }

@@ -10,9 +10,11 @@
 import { Env, ChatMessage, RealtimeWebhookEvent, RealtimeAgentResponse } from "./types";
 import { routeAgentRequest } from "agents";
 import { TravelAgent } from "./travel-agent";
+import { RealtimeConnector } from "./realtime-connector";
 
-// Export TravelAgent for Durable Objects and agent discovery
+// Export Durable Objects for discovery
 export { TravelAgent };
+export { RealtimeConnector };
 
 // Model ID for Workers AI model
 // https://developers.cloudflare.com/workers-ai/models/
@@ -81,12 +83,17 @@ export default {
 			return handleGatewayWebSocket(request, env);
 		}
 
-		// Realtime webhook endpoint
+		// Realtime webhook endpoint (optional - can use WebSocket instead)
 		if (url.pathname === "/api/realtime/webhook") {
 			if (request.method === "POST") {
 				return handleRealtimeWebhook(request, env);
 			}
 			return new Response("Method not allowed", { status: 405 });
+		}
+
+		// Realtime WebSocket endpoint for server-side connections
+		if (url.pathname === "/api/realtime/connect") {
+			return handleRealtimeWebSocket(request, env);
 		}
 
 		// API Routes
@@ -269,11 +276,49 @@ async function handleRealtimeWebhook(
 }
 
 /**
- * Publishes a message to a Realtime room
- * Uses Cloudflare Realtime API to send agent responses
- * 
- * Note: Update the API endpoint format based on Cloudflare Realtime documentation
- * The exact endpoint structure may vary based on your Realtime configuration
+ * Handles WebSocket connection to Realtime for server-side connections
+ * This allows the Worker to maintain a persistent connection to Realtime
+ */
+async function handleRealtimeWebSocket(
+	request: Request,
+	env: Env,
+): Promise<Response> {
+	// Check if this is a WebSocket upgrade request
+	if (request.headers.get("Upgrade") !== "websocket") {
+		return new Response("Expected WebSocket upgrade", { status: 426 });
+	}
+
+	// RealtimeConnector will be available after running wrangler types
+	// Using any for now - will be properly typed after wrangler types
+	const realtimeConnector = (env as any).RealtimeConnector;
+
+	if (!realtimeConnector) {
+		return new Response("RealtimeConnector not configured", { status: 500 });
+	}
+
+	try {
+		// Get or create RealtimeConnector instance
+		// Use a single instance ID for the connector (or one per namespace)
+		const connectorId = realtimeConnector.idFromName("main");
+		const stub = realtimeConnector.get(connectorId);
+
+		// Forward the WebSocket upgrade request to the RealtimeConnector
+		return await stub.fetch(request);
+	} catch (error) {
+		console.error("Error handling Realtime WebSocket:", error);
+		return new Response(
+			JSON.stringify({ error: "Failed to establish Realtime WebSocket connection" }),
+			{
+				status: 500,
+				headers: { "content-type": "application/json" },
+			},
+		);
+	}
+}
+
+/**
+ * Publishes a message to a Realtime room via WebSocket (optimized for low latency)
+ * Uses RealtimeConnector Durable Object to maintain persistent WebSocket connection
  */
 async function publishToRealtime(
 	env: Env,
@@ -289,6 +334,17 @@ async function publishToRealtime(
 		return;
 	}
 
+	// RealtimeConnector will be available after running wrangler types
+	// Using any for now - will be properly typed after wrangler types
+	const realtimeConnector = (env as any).RealtimeConnector;
+
+	if (!realtimeConnector) {
+		console.warn("RealtimeConnector not available, falling back to HTTP API");
+		// Fallback to HTTP API if WebSocket connector not available
+		await publishToRealtimeHTTP(env, roomId, text, userId);
+		return;
+	}
+
 	try {
 		const response: RealtimeAgentResponse = {
 			type: "agent_response",
@@ -297,36 +353,71 @@ async function publishToRealtime(
 			timestamp: Date.now(),
 		};
 
-		// Publish to Realtime using the API
-		// Update this URL format based on Cloudflare Realtime API documentation
-		// Example format (adjust based on actual API):
-		// https://api.cloudflare.com/client/v4/accounts/{account_id}/realtime/namespaces/{namespace_id}/rooms/{room_id}/messages
-		const accountId = env.REALTIME_NAMESPACE_ID; // You may need a separate ACCOUNT_ID env var
-		const namespaceId = env.REALTIME_NAMESPACE_ID;
-		const realtimeUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/realtime/namespaces/${namespaceId}/rooms/${roomId}/messages`;
+		// Use RealtimeConnector Durable Object to publish via WebSocket
+		const connectorId = realtimeConnector.idFromName("main");
+		const stub = realtimeConnector.get(connectorId);
 
-		const publishResponse = await fetch(realtimeUrl, {
-			method: "POST",
-			headers: {
-				"Authorization": `Bearer ${env.REALTIME_API_TOKEN}`,
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify(response),
-		});
+		// Call the RealtimeConnector's publish endpoint
+		// The connector maintains a persistent WebSocket connection to Realtime
+		const result = await stub.fetch(
+			new Request("https://realtime-connector/publish", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					room: roomId,
+					message: response,
+				}),
+			}),
+		);
 
-		if (!publishResponse.ok) {
-			const errorText = await publishResponse.text();
-			console.error(
-				`Failed to publish to Realtime: ${publishResponse.status} ${errorText}`,
-			);
-			throw new Error(
-				`Realtime publish failed: ${publishResponse.status} ${errorText}`,
-			);
+		if (!result.ok) {
+			const errorText = await result.text();
+			console.error(`Failed to publish to Realtime via WebSocket: ${errorText}`);
+			// Fallback to HTTP
+			await publishToRealtimeHTTP(env, roomId, text, userId);
 		}
 	} catch (error) {
-		console.error("Error publishing to Realtime:", error);
-		// Don't throw - we don't want webhook failures to break the flow
-		// The error is logged but doesn't prevent the webhook from returning success
+		console.error("Error publishing to Realtime via WebSocket:", error);
+		// Fallback to HTTP API
+		await publishToRealtimeHTTP(env, roomId, text, userId);
+	}
+}
+
+/**
+ * Fallback: Publishes a message to a Realtime room via HTTP API
+ * Used when WebSocket connection is not available
+ */
+async function publishToRealtimeHTTP(
+	env: Env,
+	roomId: string,
+	text: string,
+	userId?: string,
+): Promise<void> {
+	const response: RealtimeAgentResponse = {
+		type: "agent_response",
+		text: text,
+		userId: userId,
+		timestamp: Date.now(),
+	};
+
+	const accountId = env.REALTIME_ACCOUNT_ID || env.REALTIME_NAMESPACE_ID;
+	const namespaceId = env.REALTIME_NAMESPACE_ID;
+	const realtimeUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/realtime/namespaces/${namespaceId}/rooms/${roomId}/messages`;
+
+	const publishResponse = await fetch(realtimeUrl, {
+		method: "POST",
+		headers: {
+			"Authorization": `Bearer ${env.REALTIME_API_TOKEN}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify(response),
+	});
+
+	if (!publishResponse.ok) {
+		const errorText = await publishResponse.text();
+		console.error(
+			`Failed to publish to Realtime via HTTP: ${publishResponse.status} ${errorText}`,
+		);
 	}
 }
 
