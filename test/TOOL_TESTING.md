@@ -70,7 +70,7 @@ curl -X POST http://localhost:8787/agents/TravelAgent/test-session/rpc \
 
 ## Valid Output Examples
 
-### ✅ Successful RPC Response
+### Successful RPC Response
 
 **Response Format:**
 ```json
@@ -101,7 +101,7 @@ curl -X POST http://localhost:8787/agents/TravelAgent/test-session/rpc \
 }
 ```
 
-### ❌ Error Response Format
+### Error Response Format
 
 **Method Not Found:**
 ```json
@@ -126,19 +126,19 @@ curl -X POST http://localhost:8787/agents/TravelAgent/test-session/rpc \
 ## Test Cases Covered
 
 ### 1. handleMessage Tests
-- ✅ Basic trip planning request
-- ✅ Flight search request (triggers tool usage)
-- ✅ Budget query
-- ✅ Complex request with dates and budget
+- Basic trip planning request
+- Flight search request (triggers tool usage)
+- Budget query
+- Complex request with dates and budget
 
 ### 2. searchFlights Tests
-- ✅ Direct tool call (one-way flight)
-- ✅ Round trip with multiple passengers
+- Direct tool call (one-way flight)
+- Round trip with multiple passengers
 
 ### 3. Error Handling Tests
-- ✅ Invalid method name
-- ✅ Network errors
-- ✅ Parse errors
+- Invalid method name
+- Network errors
+- Parse errors
 
 ## Expected Behavior
 

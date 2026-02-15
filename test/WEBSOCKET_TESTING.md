@@ -57,48 +57,48 @@ curl -i -N \
 
 ## Valid Output Examples
 
-### ✅ Successful Connection
+### Successful Connection
 
 **Node.js Script Output:**
 ```
-🚀 Testing WebSocket Gateway
-📍 Connecting to: ws://localhost:8787/api/gateway/ws?userId=test-user
-👤 User ID: test-user
+Testing WebSocket Gateway
+Connecting to: ws://localhost:8787/api/gateway/ws?userId=test-user
+User ID: test-user
 
-✅ WebSocket connection established!
+WebSocket connection established!
 
-📤 Sending test messages...
+Sending test messages...
 
-📤 Sending message #1:
+Sending message #1:
    Type: message
    Text: Hello, I want to plan a trip to Paris
 
-📥 Response #1:
+Response #1:
    Type: response
-   ✅ Text: Hello! I'd be happy to help you plan your trip to Paris. Let me gather some information about your preferences and requirements...
+   Text: Hello! I'd be happy to help you plan your trip to Paris. Let me gather some information about your preferences and requirements...
 
-📤 Sending message #2:
+Sending message #2:
    Type: message
    Text: What flights are available from NYC to Paris on December 1st?
 
-📥 Response #2:
+Response #2:
    Type: response
-   ✅ Text: I'll search for flights from NYC to Paris on December 1st. Let me check the available options for you...
+   Text: I'll search for flights from NYC to Paris on December 1st. Let me check the available options for you...
 
-📤 Sending message #3:
+Sending message #3:
    Type: message
    Text: What is my budget?
 
-📥 Response #3:
+Response #3:
    Type: response
-   ✅ Text: Based on our conversation, I don't have a budget specified yet. Would you like to set a budget for your trip?
+   Text: Based on our conversation, I don't have a budget specified yet. Would you like to set a budget for your trip?
 
-✅ All test messages sent and received!
-🔌 Closing connection...
-🔌 Connection closed (code: 1000, reason: none)
+All test messages sent and received!
+Closing connection...
+Connection closed (code: 1000, reason: none)
 ```
 
-### ✅ Valid Response Format
+### Valid Response Format
 
 **JSON Structure:**
 ```json
@@ -117,7 +117,7 @@ curl -i -N \
 }
 ```
 
-### ❌ Common Errors and Solutions
+### Common Errors and Solutions
 
 #### Error: "Expected WebSocket upgrade"
 - **Cause:** Request missing `Upgrade: websocket` header
@@ -160,11 +160,11 @@ curl -i -N \
 ### 3. Response Characteristics
 
 **Valid responses should:**
-- ✅ Be JSON-formatted
-- ✅ Include `type: "response"`
-- ✅ Include `text` field with agent's response
-- ✅ Optionally include `userId` field
-- ✅ Be received within 1-5 seconds (depending on LLM/tool calls)
+- Be JSON-formatted
+- Include `type: "response"`
+- Include `text` field with agent's response
+- Optionally include `userId` field
+- Be received within 1-5 seconds (depending on LLM/tool calls)
 
 **Response content may include:**
 - Trip planning suggestions

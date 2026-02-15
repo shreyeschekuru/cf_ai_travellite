@@ -21,9 +21,9 @@ const sessionName = process.argv[2] || 'test-session';
 const baseUrl = 'http://localhost:8787';
 const rpcEndpoint = `${baseUrl}/agents/TravelAgent/${sessionName}/rpc`;
 
-console.log('🔧 Testing Tool Calling and HTTP Client');
-console.log(`📍 RPC Endpoint: ${rpcEndpoint}`);
-console.log(`📦 Session: ${sessionName}\n`);
+console.log('Testing Tool Calling and HTTP Client');
+console.log(`RPC Endpoint: ${rpcEndpoint}`);
+console.log(`Session: ${sessionName}\n`);
 
 // Track test results
 let testCount = 0;
@@ -57,7 +57,7 @@ function makeRPCCall(method, args, description) {
 			},
 		};
 
-		console.log(`\n📤 Test #${testCount}: ${description}`);
+		console.log(`\nTest #${testCount}: ${description}`);
 		console.log(`   Method: ${method}`);
 		console.log(`   Args: ${JSON.stringify(args, null, 2).split('\n').map(l => '   ' + l).join('\n')}`);
 
@@ -75,16 +75,16 @@ function makeRPCCall(method, args, description) {
 					console.log(`   Status: ${res.statusCode}`);
 					
 					if (response.success) {
-						console.log(`   ✅ Success: ${JSON.stringify(response.result, null, 2).split('\n').map(l => '   ' + l).join('\n')}`);
+						console.log(`   Success: ${JSON.stringify(response.result, null, 2).split('\n').map(l => '   ' + l).join('\n')}`);
 						passCount++;
 						resolve(response.result);
 					} else {
-						console.log(`   ❌ Error: ${response.error || 'Unknown error'}`);
+						console.log(`   Error: ${response.error || 'Unknown error'}`);
 						failCount++;
 						reject(new Error(response.error || 'Unknown error'));
 					}
 				} catch (error) {
-					console.log(`   ❌ Parse Error: ${error.message}`);
+					console.log(`   Parse Error: ${error.message}`);
 					console.log(`   Raw Response: ${data}`);
 					failCount++;
 					reject(error);
@@ -93,7 +93,7 @@ function makeRPCCall(method, args, description) {
 		});
 
 		req.on('error', (error) => {
-			console.log(`   ❌ Request Error: ${error.message}`);
+			console.log(`   Request Error: ${error.message}`);
 			failCount++;
 			reject(error);
 		});
@@ -107,7 +107,7 @@ function makeRPCCall(method, args, description) {
  * Run all tests
  */
 async function runTests() {
-	console.log('🚀 Starting tests...\n');
+	console.log('Starting tests...\n');
 
 	try {
 		// Test 1: handleMessage - Basic message
@@ -171,7 +171,7 @@ async function runTests() {
 			);
 		} catch (error) {
 			// Expected to fail
-			console.log(`   ✅ Correctly rejected invalid method`);
+			console.log(`   Correctly rejected invalid method`);
 		}
 
 		// Test 7: handleMessage - Complex request
@@ -182,15 +182,15 @@ async function runTests() {
 		);
 
 	} catch (error) {
-		console.error(`\n❌ Test suite error: ${error.message}`);
+		console.error(`\nTest suite error: ${error.message}`);
 	}
 
 	// Print summary
 	console.log('\n' + '='.repeat(60));
-	console.log('📊 Test Summary:');
+	console.log('Test Summary:');
 	console.log(`   Total Tests: ${testCount}`);
-	console.log(`   ✅ Passed: ${passCount}`);
-	console.log(`   ❌ Failed: ${failCount}`);
+	console.log(`   Passed: ${passCount}`);
+	console.log(`   Failed: ${failCount}`);
 	console.log(`   Success Rate: ${((passCount / testCount) * 100).toFixed(1)}%`);
 	console.log('='.repeat(60) + '\n');
 }

@@ -20,9 +20,9 @@ const WebSocket = require('ws');
 const userId = process.argv[2] || 'test-user';
 const wsUrl = `ws://localhost:8787/api/gateway/ws?userId=${userId}`;
 
-console.log('🚀 Testing WebSocket Gateway');
-console.log(`📍 Connecting to: ${wsUrl}`);
-console.log(`👤 User ID: ${userId}\n`);
+console.log('Testing WebSocket Gateway');
+console.log(`Connecting to: ${wsUrl}`);
+console.log(`User ID: ${userId}\n`);
 
 // Create WebSocket connection
 const ws = new WebSocket(wsUrl);
@@ -37,8 +37,8 @@ const testMessages = [
 ];
 
 ws.on('open', () => {
-	console.log('✅ WebSocket connection established!\n');
-	console.log('📤 Sending test messages...\n');
+	console.log('WebSocket connection established!\n');
+	console.log('Sending test messages...\n');
 	
 	// Wait a moment for initial protocol messages, then send first test message
 	setTimeout(() => sendNextMessage(), 500);
@@ -54,7 +54,7 @@ ws.on('message', (data) => {
 		// These include: cf_agent_identity, cf_agent_state, cf_agent_mcp_servers, etc.
 		if (response.type && response.type.startsWith('cf_agent_')) {
 			// Internal protocol message - ignore for test purposes
-			console.log(`🔧 Protocol message (ignored): ${response.type}`);
+			console.log(`Protocol message (ignored): ${response.type}`);
 			return;
 		}
 		
@@ -62,14 +62,14 @@ ws.on('message', (data) => {
 		if (response.type === 'response') {
 			responseCount++;
 			
-			console.log(`📥 Agent Response #${responseCount}:`);
+			console.log(`Agent Response #${responseCount}:`);
 			
 			if (response.error) {
-				console.log('   ❌ Error:', response.error);
+				console.log('   Error:', response.error);
 			} else {
-				console.log('   ✅ Text:', response.text);
+				console.log('   Text:', response.text);
 				if (response.userId) {
-					console.log('   👤 User ID:', response.userId);
+					console.log('   User ID:', response.userId);
 				}
 			}
 			console.log();
@@ -78,29 +78,29 @@ ws.on('message', (data) => {
 			if (responseCount < testMessages.length) {
 				setTimeout(() => sendNextMessage(), 1000); // Wait 1 second between messages
 			} else {
-				console.log('✅ All test messages sent and received!');
-				console.log(`📊 Total messages received: ${totalMessageCount} (${responseCount} agent responses)`);
-				console.log('🔌 Closing connection...');
+				console.log('All test messages sent and received!');
+				console.log(`Total messages received: ${totalMessageCount} (${responseCount} agent responses)`);
+				console.log('Closing connection...');
 				setTimeout(() => ws.close(), 500);
 			}
 		} else {
 			// Unknown message type - log for debugging
-			console.log(`⚠️  Unknown message type: ${response.type}`);
+			console.log(`Unknown message type: ${response.type}`);
 			console.log('   Full response:', JSON.stringify(response, null, 2));
 		}
 	} catch (error) {
-		console.error('❌ Error parsing response:', error);
+		console.error('Error parsing response:', error);
 		console.error('   Raw data:', data.toString());
 	}
 });
 
 ws.on('error', (error) => {
-	console.error('❌ WebSocket error:', error.message);
+	console.error('WebSocket error:', error.message);
 	process.exit(1);
 });
 
 ws.on('close', (code, reason) => {
-	console.log(`🔌 Connection closed (code: ${code}, reason: ${reason || 'none'})`);
+	console.log(`Connection closed (code: ${code}, reason: ${reason || 'none'})`);
 	process.exit(0);
 });
 
@@ -110,7 +110,7 @@ function sendNextMessage() {
 	}
 	
 	const message = testMessages[responseCount];
-	console.log(`📤 Sending message #${responseCount + 1}:`);
+	console.log(`Sending message #${responseCount + 1}:`);
 	console.log('   Type:', message.type);
 	console.log('   Text:', message.text);
 	console.log();
@@ -120,7 +120,7 @@ function sendNextMessage() {
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {
-	console.log('\n🛑 Shutting down...');
+	console.log('\nShutting down...');
 	ws.close();
 	process.exit(0);
 });

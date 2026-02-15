@@ -17,13 +17,13 @@ This template demonstrates how to build an AI-powered chat interface using Cloud
 
 ## Features
 
-- 💬 Simple and responsive chat interface
-- ⚡ Server-Sent Events (SSE) for streaming responses
-- 🧠 Powered by Cloudflare Workers AI LLMs
-- 🛠️ Built with TypeScript and Cloudflare Workers
-- 📱 Mobile-friendly design
-- 🔄 Maintains chat history on the client
-- 🔎 Built-in Observability logging
+- Simple and responsive chat interface
+- Server-Sent Events (SSE) for streaming responses
+- Powered by Cloudflare Workers AI LLMs
+- Built with TypeScript and Cloudflare Workers
+- Mobile-friendly design
+- Maintains chat history on the client
+- Built-in Observability logging
 <!-- dash-content-end -->
 
 ## Getting Started
