@@ -7,6 +7,10 @@ export interface Env extends Cloudflare.Env {
 
 	AMADEUS_API_KEY: string;
 	AMADEUS_API_SECRET: string;
+	
+	// Realtime configuration
+	REALTIME_API_TOKEN?: string;
+	REALTIME_NAMESPACE_ID?: string;
 }
 
 /**
@@ -110,3 +114,30 @@ export function isAgentProtocolMessage(
  * Can be a GatewayMessage or a plain string
  */
 export type ParsedWebSocketMessage = GatewayMessage | string;
+
+/**
+ * Realtime webhook event format
+ * Sent from Cloudflare Realtime when a message is received
+ */
+export interface RealtimeWebhookEvent {
+	type: "message" | "presence" | "connection";
+	room: string;
+	userId?: string;
+	message?: {
+		text: string;
+		[key: string]: unknown;
+	};
+	timestamp?: number;
+	[key: string]: unknown;
+}
+
+/**
+ * Realtime agent response format
+ * Published back to Realtime rooms
+ */
+export interface RealtimeAgentResponse {
+	type: "agent_response";
+	text: string;
+	userId?: string;
+	timestamp?: number;
+}

@@ -7,7 +7,7 @@
  *
  * @license MIT
  */
-import { Env, ChatMessage } from "./types";
+import { Env, ChatMessage, RealtimeWebhookEvent, RealtimeAgentResponse } from "./types";
 import { routeAgentRequest } from "agents";
 import { TravelAgent } from "./travel-agent";
 
@@ -81,6 +81,14 @@ export default {
 			return handleGatewayWebSocket(request, env);
 		}
 
+		// Realtime webhook endpoint
+		if (url.pathname === "/api/realtime/webhook") {
+			if (request.method === "POST") {
+				return handleRealtimeWebhook(request, env);
+			}
+			return new Response("Method not allowed", { status: 405 });
+		}
+
 		// API Routes
 		if (url.pathname === "/api/chat") {
 			// Handle POST requests for chat
@@ -146,6 +154,179 @@ async function handleGatewayWebSocket(
 				headers: { "content-type": "application/json" },
 			},
 		);
+	}
+}
+
+/**
+ * Handles Realtime webhook events
+ * Receives chat events from Realtime and routes them to the TravelAgent
+ */
+async function handleRealtimeWebhook(
+	request: Request,
+	env: Env,
+): Promise<Response> {
+	try {
+		// Parse webhook event from Realtime
+		const event = (await request.json()) as RealtimeWebhookEvent;
+
+		// Only process message events
+		if (event.type !== "message" || !event.message) {
+			return new Response(JSON.stringify({ received: true }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}
+
+		// Extract message text and userId
+		const messageText = event.message.text || "";
+		const userId = event.userId || event.room; // Use room as fallback for userId
+		const roomId = event.room;
+
+		if (!messageText.trim()) {
+			return new Response(
+				JSON.stringify({ error: "Message text is required" }),
+				{
+					status: 400,
+					headers: { "content-type": "application/json" },
+				},
+			);
+		}
+
+		if (!roomId) {
+			return new Response(JSON.stringify({ error: "Room ID is required" }), {
+				status: 400,
+				headers: { "content-type": "application/json" },
+			});
+		}
+
+		// Get or create TravelAgent instance for this user
+		const agentId = env.TravelAgent.idFromName(userId);
+		const stub = env.TravelAgent.get(agentId);
+
+		// Call handleMessage on the agent
+		// We need to make an RPC call to the agent
+		const rpcRequest = {
+			type: "rpc",
+			id: `realtime-${Date.now()}`,
+			method: "handleMessage",
+			args: [messageText],
+		};
+
+		// Create a request to the agent
+		const headers = new Headers();
+		headers.set("x-partykit-room", userId);
+		headers.set("Content-Type", "application/json");
+
+		const agentRequest = new Request(
+			`${request.url.split("/api")[0]}/agents/TravelAgent/${userId}/rpc`,
+			{
+				method: "POST",
+				headers: headers,
+				body: JSON.stringify(rpcRequest),
+			},
+		);
+
+		const agentResponse = await stub.fetch(agentRequest);
+		const agentResult = (await agentResponse.json()) as {
+			success?: boolean;
+			result?: string | { message?: string; [key: string]: unknown };
+			error?: string;
+		};
+
+		// Extract the response text from the agent result
+		let responseText = "";
+		if (agentResult.success && agentResult.result) {
+			responseText =
+				typeof agentResult.result === "string"
+					? agentResult.result
+					: (agentResult.result.message as string | undefined) ||
+						JSON.stringify(agentResult.result);
+		} else {
+			responseText =
+				agentResult.error || "Failed to process message";
+		}
+
+		// Publish the agent's response back to Realtime
+		await publishToRealtime(env, roomId, responseText, userId);
+
+		return new Response(JSON.stringify({ success: true }), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+	} catch (error) {
+		console.error("Error handling Realtime webhook:", error);
+		return new Response(
+			JSON.stringify({
+				error: "Failed to process webhook",
+				message: error instanceof Error ? error.message : "Unknown error",
+			}),
+			{
+				status: 500,
+				headers: { "content-type": "application/json" },
+			},
+		);
+	}
+}
+
+/**
+ * Publishes a message to a Realtime room
+ * Uses Cloudflare Realtime API to send agent responses
+ * 
+ * Note: Update the API endpoint format based on Cloudflare Realtime documentation
+ * The exact endpoint structure may vary based on your Realtime configuration
+ */
+async function publishToRealtime(
+	env: Env,
+	roomId: string,
+	text: string,
+	userId?: string,
+): Promise<void> {
+	// Check if Realtime is configured
+	if (!env.REALTIME_API_TOKEN || !env.REALTIME_NAMESPACE_ID) {
+		console.warn(
+			"Realtime not configured: REALTIME_API_TOKEN or REALTIME_NAMESPACE_ID missing",
+		);
+		return;
+	}
+
+	try {
+		const response: RealtimeAgentResponse = {
+			type: "agent_response",
+			text: text,
+			userId: userId,
+			timestamp: Date.now(),
+		};
+
+		// Publish to Realtime using the API
+		// Update this URL format based on Cloudflare Realtime API documentation
+		// Example format (adjust based on actual API):
+		// https://api.cloudflare.com/client/v4/accounts/{account_id}/realtime/namespaces/{namespace_id}/rooms/{room_id}/messages
+		const accountId = env.REALTIME_NAMESPACE_ID; // You may need a separate ACCOUNT_ID env var
+		const namespaceId = env.REALTIME_NAMESPACE_ID;
+		const realtimeUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/realtime/namespaces/${namespaceId}/rooms/${roomId}/messages`;
+
+		const publishResponse = await fetch(realtimeUrl, {
+			method: "POST",
+			headers: {
+				"Authorization": `Bearer ${env.REALTIME_API_TOKEN}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify(response),
+		});
+
+		if (!publishResponse.ok) {
+			const errorText = await publishResponse.text();
+			console.error(
+				`Failed to publish to Realtime: ${publishResponse.status} ${errorText}`,
+			);
+			throw new Error(
+				`Realtime publish failed: ${publishResponse.status} ${errorText}`,
+			);
+		}
+	} catch (error) {
+		console.error("Error publishing to Realtime:", error);
+		// Don't throw - we don't want webhook failures to break the flow
+		// The error is logged but doesn't prevent the webhook from returning success
 	}
 }
 
