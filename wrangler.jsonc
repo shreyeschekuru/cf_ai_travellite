@@ -34,13 +34,13 @@
 		  "id": "cf3cd86650d843d4894a5b86ebec3e8d"
 		}
 	  ],
-	  "durable_objects": {
+	"durable_objects": {
 		"bindings": [
-		  {
-			"name": "TRAVEL_AGENT",
+			{
+			"name": "TravelAgent",
 			"class_name": "TravelAgent",
 			"script_name": "travellite"
-		  }
+			}
 		]
-	  }
+	}
 }

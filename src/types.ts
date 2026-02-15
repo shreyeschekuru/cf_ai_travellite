@@ -1,18 +1,13 @@
 /**
  * Type definitions for the LLM chat application.
  */
-import { TravelAgent } from "./travel-agent";
 
 export interface Env extends Cloudflare.Env {
-	//AI and ASSETS are inherited from Cloudflare.Env
-	VECTORIZE: Vectorize;
+	//AI, ASSETS, TravelAgent, and VECTORIZE are inherited from Cloudflare.Env
 	KVNAMESPACE: KVNamespace;
 
 	AMADEUS_API_KEY: string;
 	AMADEUS_API_SECRET: string;
-
-	// Travel Agent Durable Object binding
-	TRAVEL_AGENT: DurableObjectNamespace<TravelAgent>;
 }
 
 /**
