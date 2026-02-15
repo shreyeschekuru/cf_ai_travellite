@@ -8,6 +8,8 @@
  * @license MIT
  */
 import { Env, ChatMessage } from "./types";
+import { routeAgentRequest } from "agents";
+import { TravelAgent } from "./travel-agent";
 
 // Model ID for Workers AI model
 // https://developers.cloudflare.com/workers-ai/models/
@@ -27,6 +29,13 @@ export default {
 		ctx: ExecutionContext,
 	): Promise<Response> {
 		const url = new URL(request.url);
+
+		// Route agent requests first (before other routes)
+		// routeAgentRequest automatically discovers agents from env bindings
+		const agentResponse = await routeAgentRequest(request, env);
+		if (agentResponse) {
+			return agentResponse;
+		}
 
 		// Handle static assets (frontend)
 		if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
@@ -48,6 +57,9 @@ export default {
 		return new Response("Not found", { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;
+
+// Export the TravelAgent class for Durable Objects
+export { TravelAgent };
 
 /**
  * Handles chat API requests
