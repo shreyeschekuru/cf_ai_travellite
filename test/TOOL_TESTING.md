@@ -250,12 +250,5 @@ curl -X POST http://localhost:8787/agents/TravelAgent/test/rpc \
 | **State** | Stateless | Stateful |
 | **Error Handling** | Per request | Connection-level |
 
-## Next Steps
-
-After successful testing:
-- Integrate RPC calls into your frontend application
-- Add authentication/authorization
-- Implement rate limiting
-- Add request validation
-- Monitor RPC call performance
+RPC is only being used for tool testing, for actual application, a websocket connection is established
 
