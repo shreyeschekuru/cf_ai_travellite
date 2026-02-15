@@ -42,7 +42,23 @@ export default {
 				const sessionName = pathParts[3];
 				const agentId = env.TravelAgent.idFromName(sessionName);
 				const stub = env.TravelAgent.get(agentId);
-				return stub.fetch(request);
+				
+				// Add PartyServer-required headers
+				const headers = new Headers(request.headers);
+				headers.set("x-partykit-room", sessionName);
+				
+				// Clone the request first to get a fresh copy of the body
+				// Then create a new request with modified headers
+				const clonedRequest = request.clone();
+				const body = await clonedRequest.arrayBuffer();
+				
+				const modifiedRequest = new Request(request.url, {
+					method: request.method,
+					headers: headers,
+					body: body,
+				});
+				
+				return stub.fetch(modifiedRequest);
 			}
 		}
 

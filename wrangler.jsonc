@@ -42,5 +42,11 @@
 			"script_name": "travellite"
 			}
 		]
-	}
+	},
+	"migrations": [	
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["TravelAgent"]
+		}
+	]
 }

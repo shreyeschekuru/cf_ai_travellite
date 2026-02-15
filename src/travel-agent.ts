@@ -62,6 +62,69 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	}
 
 	/**
+	 * Handle HTTP requests (including RPC requests)
+	 * Implements RPC handling for @callable methods
+	 */
+	async onRequest(request: Request): Promise<Response> {
+		// Check if this is an RPC request
+		if (request.method === "POST") {
+			try {
+				const rpcData = (await request.json()) as {
+					type: string;
+					id: string;
+					method: string;
+					args: unknown[];
+				};
+
+				if (rpcData.type === "rpc" && rpcData.method) {
+					// Find the callable method
+					const method = (this as any)[rpcData.method];
+					if (method && typeof method === "function") {
+						try {
+							// Call the method with the provided arguments
+							const result = await method.apply(this, rpcData.args);
+
+							// Return RPC response
+							return Response.json({
+								type: "rpc",
+								id: rpcData.id,
+								success: true,
+								result: result,
+							});
+						} catch (error) {
+							return Response.json(
+								{
+									type: "rpc",
+									id: rpcData.id,
+									success: false,
+									error: error instanceof Error ? error.message : String(error),
+								},
+								{ status: 500 }
+							);
+						}
+					} else {
+						return Response.json(
+							{
+								type: "rpc",
+								id: rpcData.id,
+								success: false,
+								error: `Method ${rpcData.method} not found`,
+							},
+							{ status: 404 }
+						);
+					}
+				}
+			} catch (error) {
+				// If JSON parsing fails, it's not an RPC request
+				// Fall through to default handling
+			}
+		}
+
+		// For non-RPC requests, return 404
+		return new Response("Not found", { status: 404 });
+	}
+
+	/**
 	 * Handle incoming messages from clients
 	 * @param connection The connection that sent the message
 	 * @param message The message payload
