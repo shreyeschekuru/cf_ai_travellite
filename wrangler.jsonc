@@ -31,7 +31,8 @@
 	"kv_namespaces": [
 		{
 		  "binding": "KVNAMESPACE",
-		  "id": "cf3cd86650d843d4894a5b86ebec3e8d"
+		  "id": "cf3cd86650d843d4894a5b86ebec3e8d",
+		  "preview_id": "884b02f08b814725b6688882403287de"
 		}
 	  ],
 	"durable_objects": {

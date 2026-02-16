@@ -13,13 +13,10 @@ export interface AmadeusEnv {
 	AMADEUS_API_SECRET: string;
 }
 
-export interface AmadeusClientOptions {
-	useProduction?: boolean; // Default: false (uses test environment)
-}
-
 /**
  * Amadeus API Client Class
  * Handles authentication and all API calls
+ * Always uses sandbox/test environment (https://test.api.amadeus.com)
  */
 export class AmadeusClient {
 	private env: AmadeusEnv;
@@ -27,11 +24,10 @@ export class AmadeusClient {
 	private accessToken: string | null = null;
 	private tokenExpiry: number = 0;
 
-	constructor(env: AmadeusEnv, options: AmadeusClientOptions = {}) {
+	constructor(env: AmadeusEnv) {
 		this.env = env;
-		this.baseUrl = options.useProduction
-			? "https://api.amadeus.com"
-			: "https://test.api.amadeus.com";
+		// Always use sandbox/test environment
+		this.baseUrl = "https://test.api.amadeus.com";
 	}
 
 	/**

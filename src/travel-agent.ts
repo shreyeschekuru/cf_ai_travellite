@@ -69,6 +69,7 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	 */
 	private get amadeusClient(): AmadeusClient {
 		if (!this._amadeusClient) {
+			// Always use sandbox/test environment
 			this._amadeusClient = new AmadeusClient({
 				AMADEUS_API_KEY: this.env.AMADEUS_API_KEY,
 				AMADEUS_API_SECRET: this.env.AMADEUS_API_SECRET,
