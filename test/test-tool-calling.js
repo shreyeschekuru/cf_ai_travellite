@@ -130,29 +130,29 @@ async function runTests() {
 		// Wait a bit for processing
 		await new Promise(resolve => setTimeout(resolve, 2000));
 
-		// Test 3: searchFlights - Direct tool call
+		// Test 3: callAmadeusAPI - Search Flight Offers (Direct tool call)
 		await makeRPCCall(
-			'searchFlights',
-			[{
+			'callAmadeusAPI',
+			['searchFlightOffers', {
 				origin: 'NYC',
 				destination: 'LAX',
 				departureDate: '2025-12-01',
 				adults: 1
 			}],
-			'searchFlights - Direct tool call'
+			'callAmadeusAPI - Search Flight Offers (Direct tool call)'
 		);
 
-		// Test 4: searchFlights - Round trip
+		// Test 4: callAmadeusAPI - Search Flight Offers (Round trip)
 		await makeRPCCall(
-			'searchFlights',
-			[{
+			'callAmadeusAPI',
+			['searchFlightOffers', {
 				origin: 'NYC',
 				destination: 'LAX',
 				departureDate: '2025-12-01',
 				returnDate: '2025-12-08',
 				adults: 2
 			}],
-			'searchFlights - Round trip with multiple passengers'
+			'callAmadeusAPI - Search Flight Offers (Round trip with multiple passengers)'
 		);
 
 		// Test 5: handleMessage - Budget query

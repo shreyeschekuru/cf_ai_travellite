@@ -5,6 +5,7 @@ import {
 	type GatewayResponse,
 	isGatewayMessage,
 } from "./types";
+import { AmadeusClient } from "./amadeus-client";
 
 /**
  * Basic trip information
@@ -57,6 +58,24 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		currentItinerary: null,
 		recentMessages: [],
 	};
+
+	/**
+	 * Amadeus API client instance (lazy initialization)
+	 */
+	private _amadeusClient: AmadeusClient | null = null;
+
+	/**
+	 * Get or create Amadeus client instance
+	 */
+	private get amadeusClient(): AmadeusClient {
+		if (!this._amadeusClient) {
+			this._amadeusClient = new AmadeusClient({
+				AMADEUS_API_KEY: this.env.AMADEUS_API_KEY,
+				AMADEUS_API_SECRET: this.env.AMADEUS_API_SECRET,
+			});
+		}
+		return this._amadeusClient;
+	}
 
 	/**
 	 * Called when the agent is first created or restarted
@@ -202,69 +221,158 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		}
 	}
 
+	// ============================================================================
+	// AMADEUS API - Single Generic Method for Official 30 APIs
+	// ============================================================================
+
 	/**
-	 * Method to search for flights using Amadeus API
+	 * Generic method to call any official Amadeus API (30 APIs total)
+	 * Based on official Amadeus API Usage page for "travellite" app
+	 * @param apiName - Name of the API method to call
+	 * @param params - Parameters for the API call (varies by API)
+	 * @returns Standardized response: { success: true, data: result } or { success: false, error: string }
 	 */
-	@callable({ description: "Search for flights using Amadeus API" })
-	async searchFlights(params: {
-		origin: string;
-		destination: string;
-		departureDate: string;
-		returnDate?: string;
-		adults?: number;
-	}) {
+	@callable({ description: "Call any official Amadeus API by name. Flight APIs (19): searchFlightOffers, getFlightOfferPrice, searchFlightDestinations, searchCheapestFlightDates, getMostTraveledDestinations, getMostBookedDestinations, getBusiestPeriod, getFlightAvailabilities, getSeatmap, getFlightStatus, searchAirlines, getAirlineRoutes, searchLocations, getAirportNearestRelevant, getAirportRoutes, getBrandedFaresUpsell, getFlightCheckinLinks, getAirportOnTimePerformance, searchCities. Hotel APIs (4): searchHotelsByGeocode, searchHotelsByCity, searchHotelOffers, searchHotelNameAutocomplete, getHotelRatings. Destination Experience (2): searchCities, searchActivities, getActivity. Transfer (1): searchTransfers. Other (1): getRecommendedLocations" })
+	async callAmadeusAPI(apiName: string, params?: any) {
 		try {
-			// Get Amadeus access token first
-			const accessToken = await this.getAmadeusAccessToken();
+			// Map API names to client methods and handle parameter transformations
+			let result: any;
 
-			// Build flight search URL with query parameters
-			const baseUrl = "https://test.api.amadeus.com/v2/shopping/flight-offers";
-			
-			const searchParams = new URLSearchParams({
-				originLocationCode: params.origin,
-				destinationLocationCode: params.destination,
-				departureDate: params.departureDate,
-				adults: String(params.adults || 1),
-				max: "5",
-			});
+			switch (apiName) {
+				// ========================================================================
+				// FLIGHT APIs (19 APIs)
+				// ========================================================================
+				case "searchFlightOffers":
+					result = await this.amadeusClient.searchFlightOffers({
+						originLocationCode: params?.origin || params?.originLocationCode,
+						destinationLocationCode: params?.destination || params?.destinationLocationCode,
+						departureDate: params?.departureDate,
+						returnDate: params?.returnDate,
+						adults: params?.adults,
+						children: params?.children,
+						infants: params?.infants,
+						travelClass: params?.travelClass,
+						nonStop: params?.nonStop,
+						max: params?.max,
+					});
+					break;
+				case "getFlightOfferPrice":
+					result = await this.amadeusClient.getFlightOfferPrice(params?.flightOffer || params);
+					break;
+				case "searchFlightDestinations":
+					result = await this.amadeusClient.searchFlightDestinations(params);
+					break;
+				case "searchCheapestFlightDates":
+					result = await this.amadeusClient.searchCheapestFlightDates(params);
+					break;
+				case "getMostTraveledDestinations":
+					result = await this.amadeusClient.getMostTraveledDestinations(params);
+					break;
+				case "getMostBookedDestinations":
+					result = await this.amadeusClient.getMostBookedDestinations(params);
+					break;
+				case "getBusiestPeriod":
+					result = await this.amadeusClient.getBusiestPeriod(params);
+					break;
+				case "getFlightAvailabilities":
+					result = await this.amadeusClient.getFlightAvailabilities(params);
+					break;
+				case "getSeatmap":
+					result = await this.amadeusClient.getSeatmap(params?.flightOffer || params);
+					break;
+				case "getFlightStatus":
+					result = await this.amadeusClient.getFlightStatus(params);
+					break;
+				case "searchAirlines":
+					result = await this.amadeusClient.searchAirlines(params);
+					break;
+				case "getAirlineRoutes":
+					result = await this.amadeusClient.getAirlineRoutes(params);
+					break;
+				case "searchLocations":
+					result = await this.amadeusClient.searchLocations(params);
+					break;
+				case "getAirportNearestRelevant":
+					result = await this.amadeusClient.getAirportNearestRelevant(params);
+					break;
+				case "getAirportRoutes":
+					result = await this.amadeusClient.getAirportRoutes(params);
+					break;
+				case "getBrandedFaresUpsell":
+					result = await this.amadeusClient.getBrandedFaresUpsell({
+						flightOffer: params?.flightOffer || params,
+					});
+					break;
+				case "getFlightCheckinLinks":
+					result = await this.amadeusClient.getFlightCheckinLinks(params);
+					break;
+				case "getAirportOnTimePerformance":
+					result = await this.amadeusClient.getAirportOnTimePerformance(params);
+					break;
+				case "searchCities":
+					result = await this.amadeusClient.searchCities(params);
+					break;
 
-			if (params.returnDate) {
-				searchParams.append("returnDate", params.returnDate);
+				// ========================================================================
+				// HOTEL APIs (4 APIs)
+				// ========================================================================
+				case "searchHotelsByGeocode":
+					result = await this.amadeusClient.searchHotelsByGeocode(params);
+					break;
+				case "searchHotelsByCity":
+					result = await this.amadeusClient.searchHotelsByCity(params);
+					break;
+				case "searchHotelOffers":
+					result = await this.amadeusClient.searchHotelOffers(params);
+					break;
+				case "searchHotelNameAutocomplete":
+					result = await this.amadeusClient.searchHotelNameAutocomplete(params);
+					break;
+				case "getHotelRatings":
+					result = await this.amadeusClient.getHotelRatings(params);
+					break;
+
+				// ========================================================================
+				// DESTINATION EXPERIENCE APIs (2 APIs)
+				// ========================================================================
+				// Note: searchCities is already handled above in Flight APIs
+				case "searchActivities":
+					result = await this.amadeusClient.searchActivities(params);
+					break;
+				case "getActivity":
+					result = await this.amadeusClient.getActivity(params?.activityId || params, params?.lang ? { lang: params.lang } : undefined);
+					break;
+
+				// ========================================================================
+				// TRANSFER/TRANSPORTATION APIs (1 API)
+				// ========================================================================
+				case "searchTransfers":
+					result = await this.amadeusClient.searchTransfers(params);
+					break;
+
+				// ========================================================================
+				// OTHER APIs (1 API)
+				// ========================================================================
+				case "getRecommendedLocations":
+					result = await this.amadeusClient.getRecommendedLocations(params);
+					break;
+
+				default:
+					return {
+						success: false,
+						error: `Unknown API: ${apiName}. Available APIs: searchFlightOffers, getFlightOfferPrice, searchFlightDestinations, searchCheapestFlightDates, getMostTraveledDestinations, getMostBookedDestinations, getBusiestPeriod, getFlightAvailabilities, getSeatmap, getFlightStatus, searchAirlines, getAirlineRoutes, searchLocations, getAirportNearestRelevant, getAirportRoutes, getBrandedFaresUpsell, getFlightCheckinLinks, getAirportOnTimePerformance, searchCities, searchHotelsByGeocode, searchHotelsByCity, searchHotelOffers, searchHotelNameAutocomplete, getHotelRatings, searchActivities, getActivity, searchTransfers, getRecommendedLocations`,
+					};
 			}
 
-			// Use GET with query parameters
-			const response = await fetch(`${baseUrl}?${searchParams}`, {
-				method: "GET",
-				headers: {
-					Authorization: `Bearer ${accessToken}`,
-				},
-			});
-
-			if (!response.ok) {
-				const errorText = await response.text();
-				throw new Error(
-					`Amadeus API error: ${response.statusText} - ${errorText}`,
-				);
-			}
-
-			const data = (await response.json()) as { data?: any[] };
-			const flights = data.data || [];
-
-			return {
-				success: true,
-				message: "Flight search completed",
-				flights: flights,
-				params,
-			};
+			return { success: true, data: result };
 		} catch (error) {
-			console.error("Flight search error:", error);
 			return {
 				success: false,
-				error: error instanceof Error ? error.message : "Failed to search flights",
-				params,
+				error: error instanceof Error ? error.message : `Failed to call ${apiName}`,
 			};
 		}
 	}
+
 
 	/**
 	 * Main message handler that orchestrates RAG, tools, and LLM
@@ -470,16 +578,17 @@ export class TravelAgent extends Agent<Env, TravelState> {
 					this.state.basics.destination &&
 					this.state.basics.startDate
 				) {
-					// Call searchFlights method which handles Amadeus API
-					const result = await this.searchFlights({
+					// Call callAmadeusAPI to search for flight offers
+					const result = await this.callAmadeusAPI("searchFlightOffers", {
 						origin: "NYC", // Default or extract from message
 						destination: this.state.basics.destination,
 						departureDate: this.state.basics.startDate,
 						returnDate: this.state.basics.endDate,
 					});
 
-					if (result.success && result.flights) {
-						return `[Tool Results: Found ${result.flights.length} flight options]`;
+					if (result.success && result.data) {
+						const flights = result.data.data || [];
+						return `[Tool Results: Found ${flights.length} flight options]`;
 					} else {
 						return `[Tool Error: ${result.error || "Failed to search flights"}]`;
 					}
@@ -494,32 +603,6 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		}
 	}
 
-	/**
-	 * Get Amadeus API access token
-	 */
-	private async getAmadeusAccessToken(): Promise<string> {
-		const response = await fetch(
-			"https://test.api.amadeus.com/v1/security/oauth2/token",
-			{
-				method: "POST",
-				headers: {
-					"Content-Type": "application/x-www-form-urlencoded",
-				},
-				body: new URLSearchParams({
-					grant_type: "client_credentials",
-					client_id: this.env.AMADEUS_API_KEY,
-					client_secret: this.env.AMADEUS_API_SECRET,
-				}),
-			},
-		);
-
-		if (!response.ok) {
-			throw new Error("Failed to get Amadeus access token");
-		}
-
-		const data = (await response.json()) as { access_token: string };
-		return data.access_token;
-	}
 
 	/**
 	 * Generate LLM response with context and tool results
