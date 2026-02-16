@@ -29,10 +29,12 @@ All base RAG files are stored in the `RAG_files/` directory as `.txt` files.
 
 To seed the base RAG files into Vectorize:
 
-1. **Start the Worker**:
+1. **Start the Worker in remote mode** (Vectorize requires remote mode):
    ```bash
    npm run dev
    ```
+   
+   Note: The default `dev` script uses `--remote` flag because Vectorize bindings require remote mode. If you need local-only mode (without Vectorize), use `npm run dev:local`.
 
 2. **Run the seeding script** (in a new terminal):
    ```bash
