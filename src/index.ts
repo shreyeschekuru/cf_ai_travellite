@@ -107,10 +107,117 @@ export default {
 			return new Response("Method not allowed", { status: 405 });
 		}
 
+		// RAG seeding endpoint
+		if (url.pathname === "/api/seed-rag") {
+			if (request.method === "POST") {
+				return handleSeedRAG(request, env);
+			}
+			return new Response("Method not allowed", { status: 405 });
+		}
+
 		// Handle 404 for unmatched routes
 		return new Response("Not found", { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;
+
+/**
+ * Handle RAG file seeding
+ */
+async function handleSeedRAG(request: Request, env: Env): Promise<Response> {
+	try {
+		const { fileName, content } = await request.json() as { fileName: string; content: string };
+
+		if (!fileName || !content) {
+			return Response.json(
+				{ success: false, error: "fileName and content are required" },
+				{ status: 400 }
+			);
+		}
+
+		// Check if already ingested
+		const kvKey = `rag:file:${fileName}`;
+		const existing = await env.KVNAMESPACE.get(kvKey);
+		
+		if (existing) {
+			return Response.json({
+				success: true,
+				skipped: true,
+				message: "File already ingested",
+			});
+		}
+
+		// Generate embedding
+		const embeddingResponse = await env.AI.run("@cf/baai/bge-base-en-v1.5", {
+			text: [content],
+		});
+
+		// Extract embedding
+		let embedding: number[] = [];
+		if (embeddingResponse && typeof embeddingResponse === "object" && "data" in embeddingResponse) {
+			const data = embeddingResponse.data as any;
+			if (Array.isArray(data) && data.length > 0) {
+				if (Array.isArray(data[0])) {
+					embedding = data[0];
+				} else {
+					embedding = data;
+				}
+			}
+		}
+
+		if (embedding.length === 0) {
+			return Response.json(
+				{ success: false, error: "Failed to generate embedding" },
+				{ status: 500 }
+			);
+		}
+
+		// Extract topic from filename
+		const topic = fileName.replace(".txt", "").replace(/_/g, " ");
+
+		// Prepare metadata
+		const metadata = {
+			source: "base-rag-file",
+			type: "travel-knowledge",
+			topic: topic,
+			fileName: fileName,
+			text: content, // Store full content for retrieval
+			createdAt: Date.now(),
+		};
+
+		// Create ID from filename
+		const id = `rag-${fileName.replace(".txt", "").replace(/[^a-z0-9]/gi, "-").toLowerCase()}`;
+
+		// Upsert to Vectorize
+		await env.VECTORIZE.upsert([
+			{
+				id: id,
+				values: embedding,
+				metadata: metadata,
+			},
+		]);
+
+		// Mark as ingested in KV
+		await env.KVNAMESPACE.put(kvKey, JSON.stringify({
+			ingestedAt: Date.now(),
+			fileName: fileName,
+		}));
+
+		return Response.json({
+			success: true,
+			id: id,
+			message: "File ingested successfully",
+		});
+	} catch (error) {
+		console.error("Error seeding RAG file:", error);
+		return Response.json(
+			{
+				success: false,
+				error: error instanceof Error ? error.message : "Unknown error",
+			},
+			{ status: 500 }
+		);
+	}
+}
 
 /**
  * Handles Gateway WebSocket connections for low-latency realtime communication

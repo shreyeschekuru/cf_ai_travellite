@@ -525,25 +525,237 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	}
 
 	/**
+	 * Generate embedding for text using Workers AI
+	 */
+	private async generateEmbedding(text: string): Promise<number[]> {
+		try {
+			const response = await this.env.AI.run("@cf/baai/bge-base-en-v1.5", {
+				text: [text],
+			});
+
+			// Extract embedding from response
+			if (response && typeof response === "object" && "data" in response) {
+				const data = response.data as any;
+				if (Array.isArray(data) && data.length > 0 && Array.isArray(data[0])) {
+					return data[0];
+				}
+				if (Array.isArray(data)) {
+					return data;
+				}
+			}
+
+			throw new Error("Unexpected embedding response format");
+		} catch (error) {
+			console.error("Embedding generation error:", error);
+			throw error;
+		}
+	}
+
+	/**
 	 * Perform RAG search using Vectorize
 	 */
 	private async performRAG(query: string): Promise<string> {
 		try {
-			// Generate embedding for the query (simplified - you'd use Workers AI embedding model)
-			// For now, we'll use a simple keyword-based approach
-			// In production, you'd generate embeddings and search Vectorize
+			// Generate embedding for the query
+			const queryEmbedding = await this.generateEmbedding(query);
 
-			// Example: Query Vectorize index
-			// const embedding = await this.generateEmbedding(query);
-			// const results = await this.env.VECTORIZE.query(embedding, { topK: 5 });
+			// Build filter based on current trip state
+			const filter: Record<string, string> = {};
+			if (this.state.basics.destination) {
+				// Try to extract city code or use destination name
+				filter.city = this.state.basics.destination;
+			}
 
-			// For now, return a placeholder
-			// You would query your Vectorize index with travel knowledge here
-			return `[RAG Context: Found relevant travel information about ${this.state.basics.destination || "the destination"}]`;
+			// Query Vectorize index
+			const queryResult = await this.env.VECTORIZE.query(queryEmbedding, {
+				topK: 5,
+				filter: Object.keys(filter).length > 0 ? filter : undefined,
+			});
+
+			if (!queryResult || !queryResult.matches || queryResult.matches.length === 0) {
+				return "";
+			}
+
+			// Format results into context paragraphs
+			const contextParagraphs = queryResult.matches
+				.map((match: any, index: number) => {
+					const metadata = match.metadata || {};
+					const source = metadata.source || "travel knowledge base";
+					const type = metadata.type || "general";
+					const topic = metadata.topic || "";
+					const text = metadata.text || ""; // Retrieve stored text
+					
+					// Use stored text if available, otherwise construct from metadata
+					const contextText = text || (topic 
+						? `Information about ${topic} (${type})`
+						: `Travel information (${type})`);
+					
+					return `[${index + 1}] ${contextText} (Source: ${source}, Score: ${match.score?.toFixed(3) || "N/A"})`;
+				})
+				.join("\n\n");
+
+			return contextParagraphs;
 		} catch (error) {
 			console.error("RAG search error:", error);
 			return "";
 		}
+	}
+
+	/**
+	 * Ingest Amadeus result into Vectorize with deduplication
+	 * @param result - Normalized Amadeus API result
+	 * @param type - Type of result: "hotel", "flight", "activity", "poi", etc.
+	 * @param city - City/location for the result
+	 */
+	private async ingestAmadeusResult(
+		result: any,
+		type: string,
+		city?: string,
+	): Promise<void> {
+		try {
+			// Extract Amadeus ID from result
+			const amadeusId = result.id || result.hotelId || result.activityId || result.poiId || null;
+			if (!amadeusId) {
+				console.warn("Cannot ingest result without ID");
+				return;
+			}
+
+			// Check KV for deduplication
+			const kvKey = `amadeus:${type}:${amadeusId}`;
+			const existing = await this.env.KVNAMESPACE.get(kvKey);
+			
+			if (existing) {
+				// Already ingested, skip
+				console.log(`Skipping duplicate: ${kvKey}`);
+				return;
+			}
+
+			// Build summary based on type
+			let summary = "";
+			const tags: string[] = [];
+
+			switch (type) {
+				case "hotel":
+					summary = this.summarizeHotel(result);
+					if (result.price) tags.push("hotel");
+					if (result.rating) tags.push(`rating-${Math.floor(result.rating)}`);
+					break;
+				case "flight":
+					summary = this.summarizeFlight(result);
+					tags.push("flight");
+					if (result.price) {
+						const price = parseFloat(result.price.total || result.price);
+						if (price < 300) tags.push("budget");
+						else if (price < 800) tags.push("midrange");
+						else tags.push("premium");
+					}
+					break;
+				case "activity":
+					summary = this.summarizeActivity(result);
+					tags.push("activity");
+					if (result.category) tags.push(result.category.toLowerCase());
+					break;
+				default:
+					summary = JSON.stringify(result).substring(0, 500);
+					tags.push(type);
+			}
+
+			if (!summary || summary.length < 20) {
+				console.warn("Summary too short, skipping ingestion");
+				return;
+			}
+
+			// Generate embedding
+			const embedding = await this.generateEmbedding(summary);
+
+			// Prepare metadata (include summary text for retrieval)
+			const metadata = {
+				amadeusId: String(amadeusId),
+				city: city || this.state.basics.destination || "unknown",
+				type: type,
+				tags: tags.join(","),
+				createdAt: Date.now(),
+				source: "amadeus",
+				text: summary, // Store summary text for retrieval
+			};
+
+			// Upsert to Vectorize
+			await this.env.VECTORIZE.upsert([
+				{
+					id: `amadeus-${type}-${amadeusId}`,
+					values: embedding,
+					metadata: metadata,
+				},
+			]);
+
+			// Store in KV to mark as ingested
+			await this.env.KVNAMESPACE.put(kvKey, JSON.stringify({
+				ingestedAt: Date.now(),
+				type: type,
+				city: city,
+			}));
+
+			console.log(`Ingested ${type} ${amadeusId} into Vectorize`);
+		} catch (error) {
+			console.error("Error ingesting Amadeus result:", error);
+			// Don't throw - ingestion failures shouldn't break the flow
+		}
+	}
+
+	/**
+	 * Summarize hotel result for RAG ingestion
+	 */
+	private summarizeHotel(hotel: any): string {
+		const name = hotel.name || hotel.hotelName || "Hotel";
+		const city = hotel.address?.cityName || hotel.cityCode || "";
+		const price = hotel.price?.total || hotel.price?.base || "";
+		const rating = hotel.rating || hotel.starRating || "";
+		const amenities = hotel.amenities || [];
+		
+		let summary = `${name}`;
+		if (city) summary += ` in ${city}`;
+		if (rating) summary += ` (${rating}-star)`;
+		if (price) summary += `, typically ${price}`;
+		if (amenities.length > 0) {
+			summary += `. Features: ${amenities.slice(0, 3).join(", ")}`;
+		}
+		
+		return summary;
+	}
+
+	/**
+	 * Summarize flight result for RAG ingestion
+	 */
+	private summarizeFlight(flight: any): string {
+		const origin = flight.origin?.iataCode || flight.originLocationCode || "";
+		const destination = flight.destination?.iataCode || flight.destinationLocationCode || "";
+		const price = flight.price?.total || flight.price?.grandTotal || "";
+		const duration = flight.duration || "";
+		const stops = flight.numberOfBookableSeats !== undefined ? "non-stop" : "with stops";
+		
+		let summary = `Flight from ${origin} to ${destination}`;
+		if (price) summary += ` for ${price}`;
+		if (duration) summary += `, duration ${duration}`;
+		summary += ` (${stops})`;
+		
+		return summary;
+	}
+
+	/**
+	 * Summarize activity result for RAG ingestion
+	 */
+	private summarizeActivity(activity: any): string {
+		const name = activity.name || activity.title || "Activity";
+		const city = activity.geoCode?.cityName || "";
+		const price = activity.price?.amount || "";
+		const category = activity.category || "";
+		
+		let summary = `${name}`;
+		if (city) summary += ` in ${city}`;
+		if (category) summary += ` (${category})`;
+		if (price) summary += `, priced at ${price}`;
+		
+		return summary;
 	}
 
 	/**
@@ -571,6 +783,8 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	private async useTools(message: string): Promise<string> {
 		try {
 			const lowerMessage = message.toLowerCase();
+			let toolResults: string[] = [];
+			const city = this.state.basics.destination;
 
 			// Check if user is asking about flights
 			if (lowerMessage.includes("flight")) {
@@ -588,15 +802,71 @@ export class TravelAgent extends Agent<Env, TravelState> {
 
 					if (result.success && result.data) {
 						const flights = result.data.data || [];
-						return `[Tool Results: Found ${flights.length} flight options]`;
+						
+						// Ingest top results into Vectorize
+						for (const flight of flights.slice(0, 5)) {
+							await this.ingestAmadeusResult(flight, "flight", city);
+						}
+						
+						toolResults.push(`Found ${flights.length} flight options`);
 					} else {
-						return `[Tool Error: ${result.error || "Failed to search flights"}]`;
+						toolResults.push(`Flight search error: ${result.error || "Failed to search flights"}`);
 					}
 				}
 			}
 
-			// Add more tool calls as needed (hotels, etc.)
-			return "";
+			// Check if user is asking about hotels
+			if (lowerMessage.includes("hotel") || lowerMessage.includes("accommodation")) {
+				if (this.state.basics.destination) {
+					const result = await this.callAmadeusAPI("searchHotelOffers", {
+						cityCode: city,
+						checkInDate: this.state.basics.startDate,
+						checkOutDate: this.state.basics.endDate,
+						adults: 2,
+					});
+
+					if (result.success && result.data) {
+						const hotels = result.data.data || [];
+						
+						// Ingest top results into Vectorize
+						for (const hotel of hotels.slice(0, 5)) {
+							await this.ingestAmadeusResult(hotel, "hotel", city);
+						}
+						
+						toolResults.push(`Found ${hotels.length} hotel options`);
+					} else {
+						toolResults.push(`Hotel search error: ${result.error || "Failed to search hotels"}`);
+					}
+				}
+			}
+
+			// Check if user is asking about activities
+			if (lowerMessage.includes("activity") || lowerMessage.includes("tour") || lowerMessage.includes("things to do")) {
+				// Try to get coordinates for the destination (simplified - would need location lookup)
+				const result = await this.callAmadeusAPI("searchActivities", {
+					latitude: 48.8566, // Default Paris - should be looked up from destination
+					longitude: 2.3522,
+					radius: 5,
+					pageLimit: 10,
+				});
+
+				if (result.success && result.data) {
+					const activities = result.data.data || [];
+					
+					// Ingest top results into Vectorize
+					for (const activity of activities.slice(0, 5)) {
+						await this.ingestAmadeusResult(activity, "activity", city);
+					}
+					
+					toolResults.push(`Found ${activities.length} activity options`);
+				} else {
+					toolResults.push(`Activity search error: ${result.error || "Failed to search activities"}`);
+				}
+			}
+
+			return toolResults.length > 0 
+				? `[Tool Results: ${toolResults.join("; ")}]`
+				: "";
 		} catch (error) {
 			console.error("Tool execution error:", error);
 			return `[Tool Error: ${error instanceof Error ? error.message : "Unknown error"}]`;
