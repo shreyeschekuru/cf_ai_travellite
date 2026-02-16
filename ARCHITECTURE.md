@@ -1,6 +1,4 @@
-# Architecture: WebSocket Gateway vs Realtime Integration
-
-## Overview
+# Architecture Overview
 
 This project implements two different approaches for real-time communication with the TravelAgent:
 
