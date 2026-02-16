@@ -203,8 +203,7 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	}
 
 	/**
-	 * Example method to search for flights using Amadeus API
-	 * Marked as callable so clients can invoke it
+	 * Method to search for flights using Amadeus API
 	 */
 	@callable({ description: "Search for flights using Amadeus API" })
 	async searchFlights(params: {
@@ -214,18 +213,57 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		returnDate?: string;
 		adults?: number;
 	}) {
-		// Access Amadeus API credentials from env
-		const apiKey = this.env.AMADEUS_API_KEY;
-		const apiSecret = this.env.AMADEUS_API_SECRET;
+		try {
+			// Get Amadeus access token first
+			const accessToken = await this.getAmadeusAccessToken();
 
-		// TODO: Implement Amadeus API flight search
-		// This is a placeholder - you'll need to implement the actual API call
+			// Build flight search URL with query parameters
+			const baseUrl = "https://test.api.amadeus.com/v2/shopping/flight-offers";
+			
+			const searchParams = new URLSearchParams({
+				originLocationCode: params.origin,
+				destinationLocationCode: params.destination,
+				departureDate: params.departureDate,
+				adults: String(params.adults || 1),
+				max: "5",
+			});
 
-		return {
-			success: true,
-			message: "Flight search functionality to be implemented",
-			params,
-		};
+			if (params.returnDate) {
+				searchParams.append("returnDate", params.returnDate);
+			}
+
+			// Use GET with query parameters
+			const response = await fetch(`${baseUrl}?${searchParams}`, {
+				method: "GET",
+				headers: {
+					Authorization: `Bearer ${accessToken}`,
+				},
+			});
+
+			if (!response.ok) {
+				const errorText = await response.text();
+				throw new Error(
+					`Amadeus API error: ${response.statusText} - ${errorText}`,
+				);
+			}
+
+			const data = (await response.json()) as { data?: any[] };
+			const flights = data.data || [];
+
+			return {
+				success: true,
+				message: "Flight search completed",
+				flights: flights,
+				params,
+			};
+		} catch (error) {
+			console.error("Flight search error:", error);
+			return {
+				success: false,
+				error: error instanceof Error ? error.message : "Failed to search flights",
+				params,
+			};
+		}
 	}
 
 	/**
@@ -432,15 +470,19 @@ export class TravelAgent extends Agent<Env, TravelState> {
 					this.state.basics.destination &&
 					this.state.basics.startDate
 				) {
-					// Call Amadeus API for flight search
-					const flightResults = await this.searchFlightsViaAmadeus({
+					// Call searchFlights method which handles Amadeus API
+					const result = await this.searchFlights({
 						origin: "NYC", // Default or extract from message
 						destination: this.state.basics.destination,
 						departureDate: this.state.basics.startDate,
 						returnDate: this.state.basics.endDate,
 					});
 
-					return `[Tool Results: Found ${flightResults.length} flight options]`;
+					if (result.success && result.flights) {
+						return `[Tool Results: Found ${result.flights.length} flight options]`;
+					} else {
+						return `[Tool Error: ${result.error || "Failed to search flights"}]`;
+					}
 				}
 			}
 
@@ -450,52 +492,6 @@ export class TravelAgent extends Agent<Env, TravelState> {
 			console.error("Tool execution error:", error);
 			return `[Tool Error: ${error instanceof Error ? error.message : "Unknown error"}]`;
 		}
-	}
-
-	/**
-	 * Search flights via Amadeus API using GET
-	 */
-	private async searchFlightsViaAmadeus(params: {
-		origin: string;
-		destination: string;
-		departureDate: string;
-		returnDate?: string;
-	}): Promise<any[]> {
-		// Get Amadeus access token first
-		const accessToken = await this.getAmadeusAccessToken();
-
-		// Build flight search URL with query parameters
-		const baseUrl = "https://test.api.amadeus.com/v2/shopping/flight-offers";
-		
-		const searchParams = new URLSearchParams({
-			originLocationCode: params.origin,
-			destinationLocationCode: params.destination,
-			departureDate: params.departureDate,
-			adults: "1",
-			max: "5",
-		});
-
-		if (params.returnDate) {
-			searchParams.append("returnDate", params.returnDate);
-		}
-
-		// Use GET with query parameters
-		const response = await fetch(`${baseUrl}?${searchParams}`, {
-			method: "GET",
-			headers: {
-				Authorization: `Bearer ${accessToken}`,
-			},
-		});
-
-		if (!response.ok) {
-			const errorText = await response.text();
-			throw new Error(
-				`Amadeus API error: ${response.statusText} - ${errorText}`,
-			);
-		}
-
-		const data = (await response.json()) as { data?: any[] };
-		return data.data || [];
 	}
 
 	/**

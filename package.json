@@ -34,7 +34,8 @@
 		"start": "wrangler dev",
 		"test": "vitest",
 		"test:ws": "node test/test-websocket.js",
-		"test:tools": "node test/test-tool-calling.js"
+		"test:tools": "node test/test-tool-calling.js",
+		"test:amadeus": "node test/test-amadeus-flights.js"
 	},
 	"dependencies": {
 		"agents": "^0.4.1"
