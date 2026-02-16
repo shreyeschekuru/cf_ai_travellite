@@ -760,107 +760,186 @@ export class TravelAgent extends Agent<Env, TravelState> {
 
 	/**
 	 * Determine if tools (Amadeus API) should be used
+	 * Detects any travel-related query that might need API calls
 	 */
 	private shouldUseTools(message: string): boolean {
 		const toolKeywords = [
-			"flight",
-			"flights",
-			"book",
-			"search",
-			"price",
-			"cost",
-			"airline",
-			"hotel",
-			"accommodation",
+			// Flight-related
+			"flight", "flights", "airline", "airport", "departure", "arrival",
+			// Hotel-related
+			"hotel", "hotels", "accommodation", "accommodations", "stay", "lodging",
+			// Activity-related
+			"activity", "activities", "tour", "tours", "things to do", "attractions",
+			// General travel
+			"book", "booking", "search", "price", "cost", "availability", "options",
+			// Location-related
+			"destination", "route", "transfer", "car rental", "rental car",
+			// Recommendations
+			"recommend", "suggest", "find", "show me", "what are",
 		];
 		const lowerMessage = message.toLowerCase();
 		return toolKeywords.some((keyword) => lowerMessage.includes(keyword));
 	}
 
 	/**
+	 * Use LLM to determine which Amadeus API to call based on user intent
+	 * Returns: { apiName: string, params: any } or null
+	 */
+	private async determineAmadeusAPICall(message: string): Promise<{ apiName: string; params: any } | null> {
+		try {
+			// Use LLM to analyze intent and determine which API to call
+			const prompt = `Analyze this travel query and determine which Amadeus API to call. Available APIs:
+- Flight APIs: searchFlightOffers, searchFlightDestinations, searchCheapestFlightDates, getMostTraveledDestinations, getMostBookedDestinations, getFlightStatus, getFlightAvailabilities, getSeatmap, getAirlineRoutes, getAirportRoutes, getAirportNearestRelevant, getFlightCheckinLinks, getAirportOnTimePerformance
+- Hotel APIs: searchHotelOffers, searchHotelsByGeocode, searchHotelsByCity, searchHotelNameAutocomplete, getHotelRatings
+- Activity APIs: searchActivities, getActivity
+- Transfer APIs: searchTransfers
+- Location APIs: searchLocations, searchCities, getRecommendedLocations
+- Other: getBusiestPeriod, getBrandedFaresUpsell
+
+User query: "${message}"
+
+Current trip state:
+- Destination: ${this.state.basics.destination || "not specified"}
+- Dates: ${this.state.basics.startDate || "not specified"} to ${this.state.basics.endDate || "not specified"}
+- Budget: ${this.state.basics.budget || "not specified"}
+
+Respond with ONLY a JSON object: { "apiName": "api_name", "params": { ... } } or { "apiName": null } if no API call is needed.
+Extract relevant parameters from the query and trip state.`;
+
+			const response = await this.env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8", {
+				messages: [
+					{ role: "system", content: "You are a travel API routing assistant. Respond with only valid JSON." },
+					{ role: "user", content: prompt },
+				],
+				max_tokens: 200,
+			});
+
+			// Parse LLM response
+			let responseText = "";
+			if (typeof response === "string") {
+				responseText = response;
+			} else if (response && typeof response === "object" && "response" in response) {
+				responseText = String(response.response);
+			} else {
+				responseText = JSON.stringify(response);
+			}
+
+			// Extract JSON from response (might have markdown code blocks)
+			const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+			if (!jsonMatch) {
+				return null;
+			}
+
+			const parsed = JSON.parse(jsonMatch[0]);
+			if (parsed.apiName && parsed.apiName !== "null") {
+				return { apiName: parsed.apiName, params: parsed.params || {} };
+			}
+
+			return null;
+		} catch (error) {
+			console.error("Error determining API call:", error);
+			return null;
+		}
+	}
+
+	/**
 	 * Use external tools (Amadeus API)
+	 * Now uses LLM-based intent detection to route to any of the 30 Amadeus APIs
 	 */
 	private async useTools(message: string): Promise<string> {
 		try {
-			const lowerMessage = message.toLowerCase();
 			let toolResults: string[] = [];
 			const city = this.state.basics.destination;
 
-			// Check if user is asking about flights
-			if (lowerMessage.includes("flight")) {
-				if (
-					this.state.basics.destination &&
-					this.state.basics.startDate
-				) {
-					// Call callAmadeusAPI to search for flight offers
-					const result = await this.callAmadeusAPI("searchFlightOffers", {
-						origin: "NYC", // Default or extract from message
-						destination: this.state.basics.destination,
-						departureDate: this.state.basics.startDate,
-						returnDate: this.state.basics.endDate,
-					});
-
-					if (result.success && result.data) {
-						const flights = result.data.data || [];
-						
-						// Ingest top results into Vectorize
-						for (const flight of flights.slice(0, 5)) {
-							await this.ingestAmadeusResult(flight, "flight", city);
-						}
-						
-						toolResults.push(`Found ${flights.length} flight options`);
-					} else {
-						toolResults.push(`Flight search error: ${result.error || "Failed to search flights"}`);
-					}
+			// Use LLM to determine which API to call
+			let apiCall = await this.determineAmadeusAPICall(message);
+			
+			// Fallback to keyword-based detection if LLM didn't determine an API
+			if (!apiCall || !apiCall.apiName) {
+				const lowerMessage = message.toLowerCase();
+				
+				// Quick keyword-based routing for most common queries
+				if (lowerMessage.includes("flight") && this.state.basics.destination && this.state.basics.startDate) {
+					apiCall = {
+						apiName: "searchFlightOffers",
+						params: {
+							origin: "NYC", // Default or extract from message
+							destination: this.state.basics.destination,
+							departureDate: this.state.basics.startDate,
+							returnDate: this.state.basics.endDate,
+						},
+					};
+				} else if ((lowerMessage.includes("hotel") || lowerMessage.includes("accommodation")) && this.state.basics.destination) {
+					apiCall = {
+						apiName: "searchHotelOffers",
+						params: {
+							cityCode: city,
+							checkInDate: this.state.basics.startDate,
+							checkOutDate: this.state.basics.endDate,
+							adults: 2,
+						},
+					};
+				} else if (lowerMessage.includes("activity") || lowerMessage.includes("tour") || lowerMessage.includes("things to do")) {
+					apiCall = {
+						apiName: "searchActivities",
+						params: {
+							latitude: 48.8566, // Default Paris - should be looked up from destination
+							longitude: 2.3522,
+							radius: 5,
+							pageLimit: 10,
+						},
+					};
+				} else {
+					// No API call needed
+					return "";
 				}
 			}
 
-			// Check if user is asking about hotels
-			if (lowerMessage.includes("hotel") || lowerMessage.includes("accommodation")) {
-				if (this.state.basics.destination) {
-					const result = await this.callAmadeusAPI("searchHotelOffers", {
-						cityCode: city,
-						checkInDate: this.state.basics.startDate,
-						checkOutDate: this.state.basics.endDate,
-						adults: 2,
-					});
-
-					if (result.success && result.data) {
-						const hotels = result.data.data || [];
-						
-						// Ingest top results into Vectorize
-						for (const hotel of hotels.slice(0, 5)) {
-							await this.ingestAmadeusResult(hotel, "hotel", city);
-						}
-						
-						toolResults.push(`Found ${hotels.length} hotel options`);
-					} else {
-						toolResults.push(`Hotel search error: ${result.error || "Failed to search hotels"}`);
-					}
-				}
-			}
-
-			// Check if user is asking about activities
-			if (lowerMessage.includes("activity") || lowerMessage.includes("tour") || lowerMessage.includes("things to do")) {
-				// Try to get coordinates for the destination (simplified - would need location lookup)
-				const result = await this.callAmadeusAPI("searchActivities", {
-					latitude: 48.8566, // Default Paris - should be looked up from destination
-					longitude: 2.3522,
-					radius: 5,
-					pageLimit: 10,
-				});
+			if (apiCall && apiCall.apiName) {
+				// Call the determined API
+				const result = await this.callAmadeusAPI(apiCall.apiName, apiCall.params);
 
 				if (result.success && result.data) {
-					const activities = result.data.data || [];
-					
-					// Ingest top results into Vectorize
-					for (const activity of activities.slice(0, 5)) {
-						await this.ingestAmadeusResult(activity, "activity", city);
+					// Determine result type for ingestion
+					let resultType = "general";
+					if (apiCall.apiName.includes("Flight") || apiCall.apiName.includes("flight")) {
+						resultType = "flight";
+					} else if (apiCall.apiName.includes("Hotel") || apiCall.apiName.includes("hotel")) {
+						resultType = "hotel";
+					} else if (apiCall.apiName.includes("Activity") || apiCall.apiName.includes("activity")) {
+						resultType = "activity";
+					} else if (apiCall.apiName.includes("Transfer") || apiCall.apiName.includes("transfer")) {
+						resultType = "transfer";
+					} else if (apiCall.apiName.includes("Location") || apiCall.apiName.includes("location") || apiCall.apiName.includes("City") || apiCall.apiName.includes("city")) {
+						resultType = "location";
 					}
-					
-					toolResults.push(`Found ${activities.length} activity options`);
+
+					// Extract results array (handle different response structures)
+					let results: any[] = [];
+					if (result.data.data && Array.isArray(result.data.data)) {
+						results = result.data.data;
+					} else if (Array.isArray(result.data)) {
+						results = result.data;
+					} else if (typeof result.data === "object") {
+						// Single result object
+						results = [result.data];
+					}
+
+					// Ingest top results into Vectorize (if applicable)
+					if (results.length > 0 && ["flight", "hotel", "activity"].includes(resultType)) {
+						for (const item of results.slice(0, 5)) {
+							await this.ingestAmadeusResult(item, resultType, city);
+						}
+					}
+
+					// Format result summary
+					if (results.length > 0) {
+						toolResults.push(`Found ${results.length} result(s) from ${apiCall.apiName}`);
+					} else {
+						toolResults.push(`API call to ${apiCall.apiName} succeeded but returned no results`);
+					}
 				} else {
-					toolResults.push(`Activity search error: ${result.error || "Failed to search activities"}`);
+					toolResults.push(`API call error (${apiCall.apiName}): ${result.error || "Failed to call API"}`);
 				}
 			}
 
