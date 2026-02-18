@@ -37,11 +37,14 @@
 		"start": "npm run set-secrets && wrangler dev --remote",
 		"test": "vitest",
 		"test:ws": "node test/test-websocket.js",
+		"test:realtime": "node test/test-realtime-webhook.js",
 		"test:tools": "node test/test-tool-calling.js",
 		"test:amadeus": "node test/test-amadeus-apis.js",
 		"seed:rag": "node scripts/seed-rag.js"
 	},
 	"dependencies": {
+		"@cloudflare/realtimekit-react": "^1.2.4",
+		"@cloudflare/realtimekit-react-ui": "^1.1.0",
 		"agents": "^0.4.1"
 	}
 }

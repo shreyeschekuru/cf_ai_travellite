@@ -207,11 +207,33 @@ export class RealtimeConnector {
 					message: { type: string; text: string; userId?: string; timestamp?: number };
 				};
 
+				console.log("[RealtimeConnector] Publish request received for room:", body.room);
+				console.log("[RealtimeConnector] Message type:", body.message.type);
+				console.log("[RealtimeConnector] Has Realtime config:", !!(this.env.REALTIME_API_TOKEN && this.env.REALTIME_NAMESPACE_ID));
+				
+				// Check if Realtime is configured
+				if (!this.env.REALTIME_API_TOKEN || !this.env.REALTIME_NAMESPACE_ID) {
+					console.warn("[RealtimeConnector] Realtime not configured - REALTIME_API_TOKEN or REALTIME_NAMESPACE_ID missing");
+					console.warn("[RealtimeConnector] Message would be:", JSON.stringify(body.message).substring(0, 100));
+					// Return success but log that it's not actually published
+					return Response.json({ 
+						success: true, 
+						warning: "Realtime not configured - message not published",
+						message: "Realtime credentials missing. Set REALTIME_API_TOKEN and REALTIME_NAMESPACE_ID to enable publishing."
+					});
+				}
+
 				await this.publishToRoom(body.room, body.message);
+				console.log("[RealtimeConnector] Successfully published to room:", body.room);
 				return Response.json({ success: true });
 			} catch (error) {
+				console.error("[RealtimeConnector] Error in publish:", error);
+				console.error("[RealtimeConnector] Error stack:", error instanceof Error ? error.stack : "No stack trace");
 				return Response.json(
-					{ error: error instanceof Error ? error.message : "Unknown error" },
+					{ 
+						error: error instanceof Error ? error.message : "Unknown error",
+						details: error instanceof Error ? error.stack : undefined
+					},
 					{ status: 500 },
 				);
 			}

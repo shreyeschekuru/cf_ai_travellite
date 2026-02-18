@@ -78,15 +78,10 @@ export default {
 			return env.ASSETS.fetch(request);
 		}
 
-		// Gateway WebSocket endpoint for low-latency realtime communication
-		if (url.pathname === "/api/gateway/ws") {
-			return handleGatewayWebSocket(request, env);
-		}
-
-		// Realtime webhook endpoint (optional - can use WebSocket instead)
+		// Realtime webhook endpoint
 		if (url.pathname === "/api/realtime/webhook") {
 			if (request.method === "POST") {
-				return handleRealtimeWebhook(request, env);
+				return handleRealtimeWebhook(request, env, ctx);
 			}
 			return new Response("Method not allowed", { status: 405 });
 		}
@@ -220,64 +215,13 @@ async function handleSeedRAG(request: Request, env: Env): Promise<Response> {
 }
 
 /**
- * Handles Gateway WebSocket connections for low-latency realtime communication
- * Routes WebSocket connections to the appropriate TravelAgent instance based on userId
- */
-async function handleGatewayWebSocket(
-	request: Request,
-	env: Env,
-): Promise<Response> {
-	// Check if this is a WebSocket upgrade request
-	if (request.headers.get("Upgrade") !== "websocket") {
-		return new Response("Expected WebSocket upgrade", { status: 426 });
-	}
-
-	const url = new URL(request.url);
-	
-	// Extract userId from query parameter (e.g., /api/gateway/ws?userId=user123)
-	const userId = url.searchParams.get("userId");
-	
-	if (!userId) {
-		return new Response("Missing userId query parameter", { status: 400 });
-	}
-
-	try {
-		// Get or create TravelAgent instance for this user
-		// Each user gets their own agent instance with persistent state
-		const agentId = env.TravelAgent.idFromName(userId);
-		const stub = env.TravelAgent.get(agentId);
-
-		// Create a new request with PartyServer-required headers
-		const headers = new Headers(request.headers);
-		headers.set("x-partykit-room", userId);
-
-		// Forward the WebSocket upgrade request to the TravelAgent Durable Object
-		// The Durable Object will handle the WebSocket connection and messages
-		const modifiedRequest = new Request(request.url, {
-			method: request.method,
-			headers: headers,
-		});
-
-		return await stub.fetch(modifiedRequest);
-	} catch (error) {
-		console.error("Error handling gateway WebSocket:", error);
-		return new Response(
-			JSON.stringify({ error: "Failed to establish WebSocket connection" }),
-			{
-				status: 500,
-				headers: { "content-type": "application/json" },
-			},
-		);
-	}
-}
-
-/**
  * Handles Realtime webhook events
  * Receives chat events from Realtime and routes them to the TravelAgent
  */
 async function handleRealtimeWebhook(
 	request: Request,
 	env: Env,
+	ctx: ExecutionContext,
 ): Promise<Response> {
 	try {
 		// Parse webhook event from Realtime
@@ -317,13 +261,13 @@ async function handleRealtimeWebhook(
 		const agentId = env.TravelAgent.idFromName(userId);
 		const stub = env.TravelAgent.get(agentId);
 
-		// Call handleMessage on the agent
-		// We need to make an RPC call to the agent
+		// Call handleMessageStreaming on the agent via RPC
+		// This will stream chunks progressively via RealtimeConnector
 		const rpcRequest = {
 			type: "rpc",
 			id: `realtime-${Date.now()}`,
-			method: "handleMessage",
-			args: [messageText],
+			method: "handleMessageStreaming",
+			args: [messageText, roomId, userId],
 		};
 
 		// Create a request to the agent
@@ -340,28 +284,31 @@ async function handleRealtimeWebhook(
 			},
 		);
 
-		const agentResponse = await stub.fetch(agentRequest);
-		const agentResult = (await agentResponse.json()) as {
-			success?: boolean;
-			result?: string | { message?: string; [key: string]: unknown };
-			error?: string;
-		};
-
-		// Extract the response text from the agent result
-		let responseText = "";
-		if (agentResult.success && agentResult.result) {
-			responseText =
-				typeof agentResult.result === "string"
-					? agentResult.result
-					: (agentResult.result.message as string | undefined) ||
-						JSON.stringify(agentResult.result);
-		} else {
-			responseText =
-				agentResult.error || "Failed to process message";
-		}
-
-		// Publish the agent's response back to Realtime
-		await publishToRealtime(env, roomId, responseText, userId);
+		// Start streaming in the background (don't wait for completion)
+		// The agent will publish chunks as they arrive via RealtimeConnector
+		console.log("[Webhook] Starting background streaming RPC call");
+		console.log("[Webhook] RPC Request:", JSON.stringify(rpcRequest, null, 2));
+		
+		ctx.waitUntil(
+			stub.fetch(agentRequest)
+				.then(async (response) => {
+					console.log("[Webhook] RPC call completed, status:", response.status);
+					const result = await response.json();
+					console.log("[Webhook] RPC result:", JSON.stringify(result, null, 2));
+					return result;
+				})
+				.catch((error) => {
+					console.error("[Webhook] Error in streaming RPC call:", error);
+					console.error("[Webhook] Error stack:", error instanceof Error ? error.stack : "No stack trace");
+					// Publish error message to Realtime
+					return publishToRealtime(
+						env,
+						roomId,
+						`Error: ${error instanceof Error ? error.message : "Failed to process message"}`,
+						userId,
+					);
+				}),
+		);
 
 		return new Response(JSON.stringify({ success: true }), {
 			status: 200,

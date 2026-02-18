@@ -1,10 +1,5 @@
-import { Agent, callable, type Connection } from "agents";
-import {
-	Env,
-	type GatewayMessage,
-	type GatewayResponse,
-	isGatewayMessage,
-} from "./types";
+import { Agent, callable } from "agents";
+import { Env } from "./types";
 import { AmadeusClient } from "./amadeus-client";
 
 /**
@@ -102,14 +97,30 @@ export class TravelAgent extends Agent<Env, TravelState> {
 				};
 
 				if (rpcData.type === "rpc" && rpcData.method) {
+					console.log("[TravelAgent] RPC call received:", rpcData.method, "with args:", rpcData.args);
 					// Find the callable method
 					const method = (this as any)[rpcData.method];
 					if (method && typeof method === "function") {
+						console.log("[TravelAgent] Method found, calling...");
 						try {
 							// Call the method with the provided arguments
 							const result = await method.apply(this, rpcData.args);
+							console.log("[TravelAgent] Method call completed, result type:", typeof result);
 
-							// Return RPC response
+							// Handle ReadableStream results (for streaming methods like handleMessage)
+							if (result instanceof ReadableStream) {
+								// For RPC calls, we accumulate the stream and return full text (backward compatible)
+								const accumulatedText = await this.accumulateStream(result);
+								
+								return Response.json({
+									type: "rpc",
+									id: rpcData.id,
+									success: true,
+									result: accumulatedText,
+								});
+							}
+
+							// Return RPC response for non-stream results
 							return Response.json({
 								type: "rpc",
 								id: rpcData.id,
@@ -149,77 +160,391 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		return new Response("Not found", { status: 404 });
 	}
 
+
 	/**
-	 * Handle incoming WebSocket messages from clients
-	 * Processes messages and sends responses back through the WebSocket connection
-	 * @param connection The connection that sent the message
-	 * @param message The message payload (typically a JSON string)
+	 * Transform the LLM stream to accumulate full text for state storage
+	 * Returns a new stream that forwards plain text chunks (not SSE) while accumulating the full response
 	 */
-	async onMessage(connection: Connection, message: unknown) {
-		try {
-			// Parse the incoming message
-			let messageData: GatewayMessage;
-			
-			if (typeof message === "string") {
+	private transformStreamForState(
+		stream: ReadableStream,
+		userInput: string,
+	): ReadableStream {
+		let accumulatedText = "";
+		const decoder = new TextDecoder();
+		const encoder = new TextEncoder();
+		const agent = this; // Capture 'this' for state update
+		const parseSSE = this.parseSSEChunk.bind(this); // Bind parse method
+
+		return new ReadableStream({
+			async start(controller) {
+				const reader = stream.getReader();
+				let buffer = "";
+
 				try {
-					const parsed = JSON.parse(message);
-					if (isGatewayMessage(parsed)) {
-						messageData = parsed;
-					} else {
-						// If not a GatewayMessage, treat the entire string as the message text
-						messageData = { type: "message", text: message };
+					while (true) {
+						const { done, value } = await reader.read();
+
+						if (done) {
+							// Process any remaining buffer
+							if (buffer) {
+								const parsed = parseSSE(buffer);
+								for (const content of parsed.contents) {
+									accumulatedText += content;
+									// Forward the chunk as plain text (not SSE)
+									controller.enqueue(encoder.encode(content));
+								}
+							}
+
+							// Update state with complete response after streaming
+							if (accumulatedText) {
+								try {
+									agent.setState({
+										...agent.state,
+										recentMessages: [
+											...agent.state.recentMessages,
+											{ role: "assistant" as const, content: accumulatedText },
+										],
+									});
+								} catch (stateError) {
+									console.error("[TravelAgent] Error updating state:", stateError);
+									// Don't fail the stream if state update fails
+								}
+							}
+
+							controller.close();
+							break;
+						}
+
+						// Decode chunk and process SSE events
+						buffer += decoder.decode(value, { stream: true });
+						const parsed = parseSSE(buffer);
+						buffer = parsed.buffer;
+
+						// Forward each content chunk as plain text (immediately, not waiting for complete events)
+						for (const content of parsed.contents) {
+							accumulatedText += content;
+							// Forward the chunk as plain text bytes (not SSE format)
+							controller.enqueue(encoder.encode(content));
+						}
 					}
-				} catch {
-					// If not JSON, treat the entire string as the message text
-					messageData = { type: "message", text: message };
+				} catch (error) {
+					console.error("[TravelAgent] Stream transform error:", error);
+					// Try to close gracefully instead of erroring
+					try {
+						controller.close();
+					} catch (closeError) {
+						console.error("[TravelAgent] Error closing stream controller:", closeError);
+					}
+				} finally {
+					reader.releaseLock();
 				}
-			} else if (isGatewayMessage(message)) {
-				messageData = message;
-			} else {
-				// Invalid message format
-				const errorResponse: GatewayResponse = {
-					type: "response",
-					error: "Invalid message format",
-				};
-				connection.send(JSON.stringify(errorResponse));
-				return;
-			}
+			},
+		});
+	}
 
-			// Extract message text
-			const text = messageData.text?.trim() || "";
-			
-			if (!text) {
-				const errorResponse: GatewayResponse = {
-					type: "response",
-					error: "Message text is required",
-				};
-				connection.send(JSON.stringify(errorResponse));
-				return;
-			}
-
-			// Process the message through the agent's handleMessage method
-			// This will handle RAG, tools, and LLM generation
-			const response = await this.handleMessage(text);
-
-			// Send response back through WebSocket connection
-			const successResponse: GatewayResponse = {
-				type: "response",
-				text: response,
-				userId: messageData.userId,
-				timestamp: Date.now(),
-			};
-			connection.send(JSON.stringify(successResponse));
-		} catch (error) {
-			console.error("Error processing WebSocket message:", error);
-			
-			// Send error response back to client
-			const errorResponse: GatewayResponse = {
-				type: "response",
-				error: error instanceof Error ? error.message : "Failed to process message",
-				timestamp: Date.now(),
-			};
-			connection.send(JSON.stringify(errorResponse));
+	/**
+	 * Stream LLM response chunks to Realtime via RealtimeConnector
+	 * Reads from ReadableStream and publishes progressive chunks to Realtime room
+	 */
+	private async streamToRealtime(
+		stream: ReadableStream,
+		roomId: string,
+		userId?: string,
+	): Promise<void> {
+		console.log("[TravelAgent] streamToRealtime: Starting");
+		
+		if (!stream) {
+			throw new Error("streamToRealtime: stream is null or undefined");
 		}
+		
+		const reader = stream.getReader();
+		const decoder = new TextDecoder();
+		let accumulatedText = "";
+		let chunkCount = 0;
+
+		try {
+			// Get RealtimeConnector to publish chunks
+			console.log("[TravelAgent] streamToRealtime: Checking for RealtimeConnector...");
+			const realtimeConnector = (this.env as any).RealtimeConnector;
+			console.log("[TravelAgent] streamToRealtime: RealtimeConnector available:", !!realtimeConnector);
+			
+			// Check if Realtime credentials are configured
+			const hasRealtimeConfig = !!(this.env as any).REALTIME_API_TOKEN && !!(this.env as any).REALTIME_NAMESPACE_ID;
+			console.log("[TravelAgent] streamToRealtime: Realtime credentials configured:", hasRealtimeConfig);
+			
+			if (!realtimeConnector) {
+				console.error("[TravelAgent] streamToRealtime: RealtimeConnector not available in env");
+				console.error("[TravelAgent] streamToRealtime: Available env keys:", Object.keys(this.env).filter(k => k.toLowerCase().includes('realtime')));
+				// Don't throw - just log and continue (we'll accumulate and log the response)
+				console.warn("[TravelAgent] streamToRealtime: RealtimeConnector not available, will accumulate response for logging");
+				// Accumulate the stream and log it instead
+				const accumulated = await this.accumulateStream(stream);
+				console.log("[TravelAgent] streamToRealtime: Accumulated response (RealtimeConnector unavailable):", accumulated.substring(0, 200));
+				return; // Exit early - can't publish without RealtimeConnector
+			}
+
+			const connectorId = realtimeConnector.idFromName("main");
+			const stub = realtimeConnector.get(connectorId);
+			console.log("[TravelAgent] streamToRealtime: Got RealtimeConnector stub");
+
+			console.log("[TravelAgent] streamToRealtime: Publishing initial streaming message");
+			// Publish initial response to indicate streaming has started
+			try {
+				const publishResponse = await stub.fetch(
+					new Request("https://realtime-connector/publish", {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({
+							room: roomId,
+							message: {
+								type: "agent_response",
+								text: "",
+								userId: userId,
+								timestamp: Date.now(),
+								streaming: true,
+							},
+						}),
+					}),
+				);
+				console.log("[TravelAgent] streamToRealtime: Initial publish response status:", publishResponse.status);
+				if (!publishResponse.ok) {
+					const errorText = await publishResponse.text();
+					console.error("[TravelAgent] streamToRealtime: Failed to publish initial message:", errorText);
+				}
+			} catch (publishError) {
+				console.error("[TravelAgent] streamToRealtime: Error publishing initial message:", publishError);
+				// Continue anyway - might be a transient error
+			}
+
+			console.log("[TravelAgent] streamToRealtime: Starting to read stream");
+
+			while (true) {
+				const { done, value } = await reader.read();
+
+				if (done) {
+					console.log("[TravelAgent] streamToRealtime: Stream done, processing final chunk");
+					// Decode any remaining bytes in the decoder's internal buffer
+					try {
+						const finalChunk = decoder.decode();
+						if (finalChunk && finalChunk.trim().length > 0) {
+							accumulatedText += finalChunk;
+							chunkCount++;
+							// Publish final chunk
+							await stub.fetch(
+								new Request("https://realtime-connector/publish", {
+									method: "POST",
+									headers: { "Content-Type": "application/json" },
+									body: JSON.stringify({
+										room: roomId,
+										message: {
+											type: "agent_response",
+											text: finalChunk,
+											userId: userId,
+											timestamp: Date.now(),
+											chunk: true,
+										},
+									}),
+								}),
+							);
+						}
+					} catch (decodeError) {
+						console.error("[TravelAgent] Error decoding final chunk:", decodeError);
+					}
+
+					// Publish final complete response
+					await stub.fetch(
+						new Request("https://realtime-connector/publish", {
+							method: "POST",
+							headers: { "Content-Type": "application/json" },
+							body: JSON.stringify({
+								room: roomId,
+								message: {
+									type: "agent_response",
+									text: accumulatedText,
+									userId: userId,
+									timestamp: Date.now(),
+									complete: true,
+								},
+							}),
+						}),
+					);
+					console.log(`[TravelAgent] streamToRealtime: Stream complete. Total chunks: ${chunkCount}, Total length: ${accumulatedText.length}`);
+					break;
+				}
+
+				// Decode chunk (plain text, not SSE)
+				const chunk = decoder.decode(value, { stream: true });
+				
+				// Only send non-empty chunks
+				if (chunk && chunk.trim().length > 0) {
+					accumulatedText += chunk;
+					chunkCount++;
+					
+					// Publish chunk immediately
+					try {
+						const chunkResponse = await stub.fetch(
+							new Request("https://realtime-connector/publish", {
+								method: "POST",
+								headers: { "Content-Type": "application/json" },
+								body: JSON.stringify({
+									room: roomId,
+									message: {
+										type: "agent_response",
+										text: chunk,
+										userId: userId,
+										timestamp: Date.now(),
+										chunk: true,
+									},
+								}),
+							}),
+						);
+						if (!chunkResponse.ok && chunkCount <= 3) {
+							const errorText = await chunkResponse.text();
+							console.error(`[TravelAgent] streamToRealtime: Failed to publish chunk ${chunkCount}:`, errorText);
+						}
+					} catch (chunkError) {
+						console.error(`[TravelAgent] streamToRealtime: Error publishing chunk ${chunkCount}:`, chunkError);
+						// Continue streaming even if publish fails
+					}
+					
+					// Log first few chunks for debugging
+					if (chunkCount <= 3) {
+						console.log(`[TravelAgent] streamToRealtime: Published chunk ${chunkCount}: "${chunk.substring(0, 30)}..."`);
+					}
+				}
+			}
+		} catch (error) {
+			console.error("[TravelAgent] Error streaming to Realtime:", error);
+			// Try to publish error message
+			try {
+				const realtimeConnector = (this.env as any).RealtimeConnector;
+				if (realtimeConnector) {
+					const connectorId = realtimeConnector.idFromName("main");
+					const stub = realtimeConnector.get(connectorId);
+					await stub.fetch(
+						new Request("https://realtime-connector/publish", {
+							method: "POST",
+							headers: { "Content-Type": "application/json" },
+							body: JSON.stringify({
+								room: roomId,
+								message: {
+									type: "agent_response",
+									text: error instanceof Error ? error.message : "Streaming error",
+									userId: userId,
+									timestamp: Date.now(),
+									isError: true,
+								},
+							}),
+						}),
+					);
+				}
+			} catch (publishError) {
+				console.error("[TravelAgent] Failed to publish error message:", publishError);
+			}
+			throw error;
+		} finally {
+			reader.releaseLock();
+		}
+	}
+
+	/**
+	 * Accumulate a ReadableStream into a complete string
+	 * Used for RPC calls that need the full response (backward compatibility)
+	 */
+	private async accumulateStream(stream: ReadableStream): Promise<string> {
+		const reader = stream.getReader();
+		const decoder = new TextDecoder();
+		let buffer = "";
+		let accumulatedText = "";
+
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+
+				if (done) {
+					// Process any remaining buffer
+					if (buffer) {
+						const parsed = this.parseSSEChunk(buffer);
+						for (const content of parsed.contents) {
+							accumulatedText += content;
+						}
+					}
+					break;
+				}
+
+				// Decode chunk and process SSE events
+				buffer += decoder.decode(value, { stream: true });
+				const parsed = this.parseSSEChunk(buffer);
+				buffer = parsed.buffer;
+
+				// Accumulate each content chunk
+				for (const content of parsed.contents) {
+					accumulatedText += content;
+				}
+			}
+		} finally {
+			reader.releaseLock();
+		}
+
+		return accumulatedText;
+	}
+
+	/**
+	 * Parse Server-Sent Events (SSE) chunks to extract content
+	 * Workers AI returns SSE format: "data: {...}\n\n"
+	 * This method processes complete SSE events and returns any remaining partial buffer
+	 */
+	private parseSSEChunk(buffer: string): { contents: string[]; buffer: string } {
+		const contents: string[] = [];
+		let remainingBuffer = buffer;
+
+		// Normalize line endings
+		const normalized = remainingBuffer.replace(/\r/g, "");
+		
+		// Find complete SSE events (ending with \n\n)
+		let eventEndIndex;
+		while ((eventEndIndex = normalized.indexOf("\n\n")) !== -1) {
+			const rawEvent = normalized.slice(0, eventEndIndex);
+			remainingBuffer = normalized.slice(eventEndIndex + 2);
+			
+			const lines = rawEvent.split("\n");
+			for (const line of lines) {
+				if (line.startsWith("data:")) {
+					const data = line.slice("data:".length).trimStart();
+					
+					// Skip [DONE] marker
+					if (data === "[DONE]") {
+						continue;
+					}
+					
+					try {
+						const jsonData = JSON.parse(data);
+						// Extract content from Workers AI response format
+						if (typeof jsonData.response === "string" && jsonData.response.length > 0) {
+							contents.push(jsonData.response);
+						} else if (jsonData.choices?.[0]?.delta?.content) {
+							// OpenAI-style format
+							const deltaContent = jsonData.choices[0].delta.content;
+							if (deltaContent && typeof deltaContent === "string") {
+								contents.push(deltaContent);
+							}
+						} else if (jsonData.content) {
+							// Alternative format
+							if (typeof jsonData.content === "string" && jsonData.content.length > 0) {
+								contents.push(jsonData.content);
+							}
+						}
+					} catch (e) {
+						// If not JSON, treat as plain text
+						if (data && data !== "[DONE]") {
+							contents.push(data);
+						}
+					}
+				}
+			}
+		}
+
+		return { contents, buffer: remainingBuffer };
 	}
 
 	// ============================================================================
@@ -378,20 +703,57 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	/**
 	 * Main message handler that orchestrates RAG, tools, and LLM
 	 * @param input User's message input
-	 * @returns Response string from the agent
+	 * @returns ReadableStream for streaming token-by-token responses
 	 */
+	/**
+	 * Handle message with streaming via Realtime
+	 * Streams chunks progressively to Realtime room via RealtimeConnector
+	 * @param input User's message input
+	 * @param roomId Realtime room ID to publish to
+	 * @param userId User ID
+	 * @returns Promise that resolves when streaming is complete
+	 */
+	@callable({ description: "Handle user message with RAG, tools, and LLM, streaming to Realtime" })
+	async handleMessageStreaming(
+		input: string,
+		roomId: string,
+		userId?: string,
+	): Promise<{ success: boolean; message?: string; error?: string }> {
+		console.log("[TravelAgent] handleMessageStreaming: Starting");
+		
+		try {
+			// Get the stream from handleMessage
+			const stream = await this.handleMessage(input);
+			
+			// Stream chunks to Realtime via RealtimeConnector
+			await this.streamToRealtime(stream, roomId, userId);
+			
+			return { success: true, message: "Streaming completed" };
+		} catch (error) {
+			console.error("[TravelAgent] handleMessageStreaming: Error:", error);
+			return {
+				success: false,
+				error: error instanceof Error ? error.message : "Failed to process message",
+			};
+		}
+	}
+
 	@callable({ description: "Handle user message with RAG, tools, and LLM" })
-	async handleMessage(input: string): Promise<string> {
+	async handleMessage(input: string): Promise<ReadableStream> {
+		console.log("[TravelAgent] handleMessage: Starting, input:", input.substring(0, 50));
+		
 		// 1. Update state with user message
+		console.log("[TravelAgent] handleMessage: Step 1 - Updating state");
 		this.setState({
 			...this.state,
 			recentMessages: [
 				...this.state.recentMessages,
-				{ role: "user", content: input },
+				{ role: "user" as const, content: input },
 			],
 		});
 
 		// 2. Extract and update trip basics from message
+		console.log("[TravelAgent] handleMessage: Step 2 - Extracting trip info");
 		this.extractTripInfo(input);
 
 		// 3. Decide on routing: RAG + Tools + LLM
@@ -399,34 +761,53 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		let toolResults = "";
 
 		// Check if we need RAG (Vectorize search)
+		console.log("[TravelAgent] handleMessage: Step 3a - Checking if RAG needed");
 		const needsRAG = this.shouldUseRAG(input);
+		console.log("[TravelAgent] handleMessage: RAG needed:", needsRAG);
 		if (needsRAG) {
+			console.log("[TravelAgent] handleMessage: Performing RAG search");
 			context = await this.performRAG(input);
+			console.log("[TravelAgent] handleMessage: RAG context length:", context.length);
 		}
 
 		// Check if we need tools (Amadeus API)
+		console.log("[TravelAgent] handleMessage: Step 3b - Checking if tools needed");
 		const needsTools = this.shouldUseTools(input);
+		console.log("[TravelAgent] handleMessage: Tools needed:", needsTools);
 		if (needsTools) {
+			console.log("[TravelAgent] handleMessage: Calling tools");
 			toolResults = await this.useTools(input);
+			console.log("[TravelAgent] handleMessage: Tool results length:", toolResults.length);
 		}
 
-		// 4. Generate LLM response with context and tool results
-		const response = await this.generateLLMResponse(
-			input,
-			context,
-			toolResults,
-		);
+		// 4. Generate LLM response stream with context and tool results
+		console.log("[TravelAgent] handleMessage: Step 4 - Generating LLM response");
+		let stream: ReadableStream;
+		try {
+			stream = await this.generateLLMResponse(
+				input,
+				context,
+				toolResults,
+			);
+			console.log("[TravelAgent] handleMessage: Got stream from generateLLMResponse, type:", stream?.constructor?.name);
+		} catch (llmError) {
+			console.error("[TravelAgent] handleMessage: Error in generateLLMResponse:", llmError);
+			console.error("[TravelAgent] handleMessage: generateLLMResponse error stack:", llmError instanceof Error ? llmError.stack : "No stack trace");
+			throw llmError;
+		}
 
-		// 5. Update state with assistant response
-		this.setState({
-			...this.state,
-			recentMessages: [
-				...this.state.recentMessages,
-				{ role: "assistant", content: response },
-			],
-		});
-
-		return response;
+		// 5. Create a transformed stream that accumulates the full response for state
+		// This allows us to stream to the client while also storing the complete response
+		console.log("[TravelAgent] handleMessage: Step 5 - Transforming stream for state");
+		try {
+			const transformedStream = this.transformStreamForState(stream, input);
+			console.log("[TravelAgent] handleMessage: Stream transformed successfully");
+			return transformedStream;
+		} catch (transformError) {
+			console.error("[TravelAgent] handleMessage: Error in transformStreamForState:", transformError);
+			console.error("[TravelAgent] handleMessage: transformStreamForState error stack:", transformError instanceof Error ? transformError.stack : "No stack trace");
+			throw transformError;
+		}
 	}
 
 	/**
@@ -956,12 +1337,15 @@ Extract relevant parameters from the query and trip state.`;
 
 	/**
 	 * Generate LLM response with context and tool results
+	 * Returns a ReadableStream for streaming token-by-token responses
 	 */
 	private async generateLLMResponse(
 		userMessage: string,
 		ragContext: string,
 		toolResults: string,
-	): Promise<string> {
+	): Promise<ReadableStream> {
+		console.log("[TravelAgent] generateLLMResponse: Starting");
+		
 		// Build system prompt
 		const systemPrompt = `You are a helpful travel assistant. You help users plan trips, find flights, and discover destinations.
 
@@ -976,6 +1360,8 @@ ${toolResults ? `\nTool results: ${toolResults}` : ""}
 
 Provide helpful, personalized travel advice based on the user's query and the information available.`;
 
+		console.log("[TravelAgent] generateLLMResponse: System prompt length:", systemPrompt.length);
+
 		// Build conversation history (last 5 messages for context)
 		const recentHistory = this.state.recentMessages.slice(-5);
 		const messages = [
@@ -986,23 +1372,43 @@ Provide helpful, personalized travel advice based on the user's query and the in
 			})),
 		];
 
-		// Call Workers AI
-		const response = await this.env.AI.run(
-			"@cf/meta/llama-3.1-8b-instruct-fp8",
-			{
-				messages,
-				max_tokens: 1024,
-			},
-		);
+		console.log("[TravelAgent] generateLLMResponse: Messages array length:", messages.length);
+		console.log("[TravelAgent] generateLLMResponse: Calling AI.run with stream: true");
 
-		// Extract response text (adjust based on actual response format)
-		if (typeof response === "string") {
-			return response;
-		} else if (response && typeof response === "object" && "response" in response) {
-			return String(response.response);
-		} else {
-			return JSON.stringify(response);
+		// Call Workers AI with streaming enabled
+		// Returns a ReadableStream in Server-Sent Events (SSE) format
+		let stream: ReadableStream;
+		try {
+			const aiResponse = await this.env.AI.run(
+				"@cf/meta/llama-3.1-8b-instruct-fp8",
+				{
+					messages,
+					max_tokens: 1024,
+					stream: true, // Enable streaming
+				},
+			);
+			
+			console.log("[TravelAgent] generateLLMResponse: AI.run returned, type:", typeof aiResponse, aiResponse?.constructor?.name);
+			
+			if (!aiResponse) {
+				throw new Error("AI.run returned null or undefined");
+			}
+			
+			if (!(aiResponse instanceof ReadableStream)) {
+				console.error("[TravelAgent] generateLLMResponse: AI.run did not return ReadableStream, got:", typeof aiResponse);
+				throw new Error(`AI.run did not return ReadableStream, got: ${typeof aiResponse}`);
+			}
+			
+			stream = aiResponse as ReadableStream;
+			console.log("[TravelAgent] generateLLMResponse: Stream obtained successfully");
+		} catch (aiError) {
+			console.error("[TravelAgent] generateLLMResponse: Error calling AI.run:", aiError);
+			console.error("[TravelAgent] generateLLMResponse: AI.run error stack:", aiError instanceof Error ? aiError.stack : "No stack trace");
+			throw aiError;
 		}
+
+		// Return the stream directly (Workers AI returns ReadableStream when stream: true)
+		return stream;
 	}
 }
 
