@@ -10,6 +10,7 @@
 import { Env, ChatMessage, RealtimeWebhookEvent, RealtimeAgentResponse } from "./types";
 import { TravelAgent } from "./travel-agent";
 import { RealtimeConnector } from "./realtime-connector";
+import { runPipeline, parseSSEChunk } from "./pipeline";
 
 // Export Durable Objects for discovery
 export { TravelAgent };
@@ -96,6 +97,27 @@ export default {
 	): Promise<Response> {
 		const url = new URL(request.url);
 
+		// Serve Travel Agent chat frontend at /agents/TravelAgent (no session in path)
+		if (request.method === "GET" && (url.pathname === "/agents/TravelAgent" || url.pathname === "/agents/TravelAgent/")) {
+			return env.ASSETS.fetch(new Request(new URL("/agents-travel-agent.html", url.origin), { method: "GET" }));
+		}
+
+		// Stream endpoint: run travel-agent pipeline (RAG + tools + LLM) and return SSE stream
+		if (url.pathname === "/api/agents/TravelAgent/stream" && request.method === "POST") {
+			return handleTravelAgentStream(request, env);
+		}
+
+		// Send message into the single-door flow (same as webhook: triggers TravelAgent DO → Realtime)
+		// POST body: { roomId, userId?, text }. Used when the UI cannot send via Realtime client (e.g. testing).
+		if (url.pathname === "/api/realtime/send" && request.method === "POST") {
+			return handleRealtimeSend(request, env);
+		}
+
+		// Realtime participant token for browser client (join room, send/listen via Realtime)
+		if (url.pathname === "/api/realtime/token" && request.method === "GET") {
+			return handleRealtimeToken(request, env);
+		}
+
 		// Route TravelAgent RPC and HTTP to the Durable Object
 		if (url.pathname.startsWith("/agents/TravelAgent/")) {
 			const agentResponse = await routeTravelAgentRequest(request, env);
@@ -153,6 +175,147 @@ export default {
 		return new Response("Not found", { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;
+
+/**
+ * Handle streaming chat using the travel-agent pipeline (RAG + tools + LLM).
+ * POST body: { message: string }. Returns Workers AI SSE stream.
+ */
+async function handleTravelAgentStream(request: Request, env: Env): Promise<Response> {
+	try {
+		const body = (await request.json()) as { message?: string };
+		const message = typeof body?.message === "string" ? body.message.trim() : "";
+		if (!message) {
+			return new Response(JSON.stringify({ error: "message is required" }), {
+				status: 400,
+				headers: { "content-type": "application/json" },
+			});
+		}
+		const stream = await runPipeline(env, message, {});
+		return new Response(stream, {
+			headers: {
+				"content-type": "text/event-stream; charset=utf-8",
+				"cache-control": "no-cache",
+				connection: "keep-alive",
+			},
+		});
+	} catch (error) {
+		console.error("[TravelAgent stream] Error:", error);
+		return new Response(
+			JSON.stringify({ error: "Failed to run pipeline", message: error instanceof Error ? error.message : "Unknown error" }),
+			{ status: 500, headers: { "content-type": "application/json" } },
+		);
+	}
+}
+
+/**
+ * POST /api/realtime/send — inject a message into the single-door flow.
+ * Same path as webhook: Gateway Worker → TravelAgent DO → Realtime.
+ * Body: { roomId: string, userId?: string, text: string }.
+ */
+async function handleRealtimeSend(request: Request, env: Env): Promise<Response> {
+	try {
+		const body = (await request.json()) as { roomId?: string; userId?: string; text?: string };
+		const roomId = body.roomId;
+		const text = body.text ?? "";
+		const userId = body.userId ?? roomId ?? "web";
+		if (!roomId || typeof roomId !== "string") {
+			return Response.json({ error: "roomId is required" }, { status: 400 });
+		}
+		if (!text.trim()) {
+			return Response.json({ error: "text is required" }, { status: 400 });
+		}
+		const rpcRequest = {
+			type: "rpc",
+			id: `send-${Date.now()}`,
+			method: "handleMessageStreaming",
+			args: [text.trim(), roomId, userId],
+		};
+		const agentPath = `/agents/TravelAgent/${userId}/rpc`;
+		const agentUrl = new URL(agentPath, request.url);
+		const agentRequest = new Request(agentUrl.toString(), {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "x-partykit-room": userId },
+			body: JSON.stringify(rpcRequest),
+		});
+		const res = await routeTravelAgentRequest(agentRequest, env);
+		if (!res) {
+			return Response.json({ error: "Failed to route to TravelAgent" }, { status: 500 });
+		}
+		if (!res.ok) {
+			const err = await res.text();
+			return Response.json({ error: "TravelAgent error", details: err }, { status: 502 });
+		}
+		const data = (await res.json()) as { result?: { success?: boolean; message?: string } };
+		return Response.json({ success: true, message: data.result?.message ?? "Processing started" });
+	} catch (e) {
+		console.error("[RealtimeSend] Error:", e);
+		return Response.json(
+			{ error: "Send failed", message: e instanceof Error ? e.message : "Unknown error" },
+			{ status: 500 },
+		);
+	}
+}
+
+/**
+ * GET /api/realtime/token — return Realtime participant auth token and meeting/room id for the frontend.
+ * Requires REALTIME_ACCOUNT_ID, REALTIME_APP_ID, CLOUDFLARE_API_TOKEN.
+ */
+async function handleRealtimeToken(request: Request, env: Env): Promise<Response> {
+	const accountId = env.REALTIME_ACCOUNT_ID;
+	const appId = env.REALTIME_APP_ID;
+	const token = env.REALTIME_API_TOKEN || env.CLOUDFLARE_API_TOKEN;
+	if (!accountId || !appId || !token) {
+		return Response.json(
+			{ error: "Realtime token not configured", need: ["REALTIME_ACCOUNT_ID", "REALTIME_APP_ID", "CLOUDFLARE_API_TOKEN"] },
+			{ status: 503 },
+		);
+	}
+	try {
+		const createUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/realtime/kit/${appId}/meetings`;
+		const createRes = await fetch(createUrl, {
+			method: "POST",
+			headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+			body: JSON.stringify({ title: "Travel Agent " + Date.now() }),
+		});
+		if (!createRes.ok) {
+			const t = await createRes.text();
+			console.error("[RealtimeToken] Create meeting failed:", createRes.status, t);
+			return Response.json({ error: "Failed to create meeting", details: t }, { status: 502 });
+		}
+		const createData = (await createRes.json()) as { result?: { id?: string }; success?: boolean };
+		const meetingId = createData.result?.id;
+		if (!meetingId) {
+			return Response.json({ error: "No meeting id in response" }, { status: 502 });
+		}
+		const partUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/realtime/kit/${appId}/meetings/${meetingId}/participants`;
+		const partRes = await fetch(partUrl, {
+			method: "POST",
+			headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+			body: JSON.stringify({
+				name: "User",
+				preset_name: "default",
+				custom_participant_id: "web-" + Date.now(),
+			}),
+		});
+		if (!partRes.ok) {
+			const t = await partRes.text();
+			console.error("[RealtimeToken] Add participant failed:", partRes.status, t);
+			return Response.json({ error: "Failed to add participant", details: t }, { status: 502 });
+		}
+		const partData = (await partRes.json()) as { result?: { auth_token?: string }; success?: boolean };
+		const authToken = partData.result?.auth_token;
+		if (!authToken) {
+			return Response.json({ error: "No auth_token in response" }, { status: 502 });
+		}
+		return Response.json({ meetingId, roomId: meetingId, authToken });
+	} catch (e) {
+		console.error("[RealtimeToken] Error:", e);
+		return Response.json(
+			{ error: "Token failed", message: e instanceof Error ? e.message : "Unknown error" },
+			{ status: 500 },
+		);
+	}
+}
 
 /**
  * Handle RAG file seeding
@@ -395,76 +558,34 @@ async function handleRealtimeWebhook(
 			});
 		}
 
-		// Call handleMessageStreaming on the agent via RPC
-		// Instead of using stub.fetch() directly (which hangs in waitUntil), route through the main handler
+		// Single door: route to TravelAgent DO. DO runs RAG + tools + LLM and streams via RealtimeConnector.
+		const userIdFromEvent = event.userId ?? event.room ?? "anonymous";
 		const rpcRequest = {
 			type: "rpc",
 			id: `realtime-${Date.now()}`,
 			method: "handleMessageStreaming",
-			args: [messageText, roomId, userId],
+			args: [messageText.trim(), roomId, userIdFromEvent],
 		};
-
-		// Build the agent URL path
-		const agentPath = `/agents/TravelAgent/${userId}/rpc`;
+		const agentPath = `/agents/TravelAgent/${userIdFromEvent}/rpc`;
 		const agentUrl = new URL(agentPath, request.url);
-		
-		// Add PartyServer-required headers
-		const headers = new Headers();
-		headers.set("x-partykit-room", userId);
-		headers.set("Content-Type", "application/json");
-
-		// Create request body
-		const bodyText = JSON.stringify(rpcRequest);
-		
-		// Create request that will be routed through the main handler
 		const agentRequest = new Request(agentUrl.toString(), {
 			method: "POST",
-			headers: headers,
-			body: bodyText,
+			headers: {
+				"Content-Type": "application/json",
+				"x-partykit-room": userId,
+			},
+			body: JSON.stringify(rpcRequest),
 		});
-
-		// Call handleMessageStreaming - it returns immediately, streaming happens in background
-		// Since handleMessageStreaming returns immediately (we fixed that), we can await it directly
-		// without using waitUntil(), which avoids the stub.fetch() hanging issue
-		console.log("[Webhook] Starting streaming RPC call");
-		console.log("[Webhook] RPC Request:", JSON.stringify(rpcRequest, null, 2));
-		console.log("[Webhook] Agent request URL:", agentRequest.url);
-		console.log("[Webhook] Calling routeTravelAgentRequest directly (not in waitUntil)...");
-		
-		// Start the RPC call in the background (fire-and-forget)
-		// This allows the webhook to return immediately, avoiding CPU time limits
-		// The work continues in the background within the Durable Object
+		console.log("[Webhook] Routing to TravelAgent DO handleMessageStreaming, room=%s userId=%s", roomId, userId);
 		routeTravelAgentRequest(agentRequest, env)
-			.then((response) => {
-				if (response) {
-					console.log("[Webhook] RPC call completed in background, status:", response.status);
-					if (!response.ok) {
-						response.text().then((errorText) => {
-							console.error("[Webhook] RPC call failed:", response.status, errorText);
-						});
-					} else {
-						response.json().then((result) => {
-							console.log("[Webhook] RPC result:", JSON.stringify(result, null, 2));
-						});
-					}
-				}
+			.then((res) => {
+				if (res && !res.ok) res.text().then((t) => console.error("[Webhook] TravelAgent RPC error:", res?.status, t));
 			})
-			.catch((error) => {
-				console.error("[Webhook] Error in background RPC call:", error);
-				console.error("[Webhook] Error type:", error?.constructor?.name);
-				console.error("[Webhook] Error stack:", error instanceof Error ? error.stack : "No stack trace");
-				// Publish error message to Realtime
-				publishToRealtime(
-					env,
-					roomId,
-					`Error: ${error instanceof Error ? error.message : "Failed to process message"}`,
-					userId,
-				).catch((publishError) => {
-					console.error("[Webhook] Failed to publish error to Realtime:", publishError);
-				});
+			.catch((e) => {
+				console.error("[Webhook] TravelAgent RPC failed:", e);
+				publishToRealtime(env, roomId, `Error: ${e instanceof Error ? e.message : "Request failed"}`, userId).catch(() => {});
 			});
 
-		// Return immediately - work continues in background
 		return new Response(JSON.stringify({ success: true, message: "Processing started" }), {
 			status: 200,
 			headers: { "content-type": "application/json" },
@@ -523,6 +644,79 @@ async function handleRealtimeWebSocket(
 			},
 		);
 	}
+}
+
+/**
+ * Publish a single chunk or control message to Realtime (streaming start/chunk/complete).
+ * Used by Worker pipeline to forward LLM stream chunks via RealtimeConnector DO only.
+ */
+async function publishChunkToRealtime(
+	env: Env,
+	roomId: string,
+	text: string,
+	userId: string | undefined,
+	flags?: { streaming?: boolean; chunk?: boolean; complete?: boolean },
+): Promise<void> {
+	const realtimeConnector = (env as any).RealtimeConnector;
+	if (!realtimeConnector) return;
+	const connectorId = realtimeConnector.idFromName("main");
+	const stub = realtimeConnector.get(connectorId);
+	const message: Record<string, unknown> = {
+		type: "agent_response",
+		text,
+		userId,
+		timestamp: Date.now(),
+	};
+	if (flags?.streaming) message.streaming = true;
+	if (flags?.chunk) message.chunk = true;
+	if (flags?.complete) message.complete = true;
+	await stub.fetch(
+		new Request("https://realtime-connector/publish", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ room: roomId, message }),
+		}),
+	);
+}
+
+/**
+ * Read LLM stream (SSE), parse chunks, and publish each to Realtime via RealtimeConnector DO.
+ * Runs in the Worker; DO only forwards/publishes.
+ */
+async function streamPipelineToRealtime(
+	env: Env,
+	stream: ReadableStream<Uint8Array>,
+	roomId: string,
+	userId: string | undefined,
+): Promise<void> {
+	await publishChunkToRealtime(env, roomId, "", userId, { streaming: true });
+	const reader = stream.getReader();
+	const decoder = new TextDecoder();
+	let buffer = "";
+	const maxChunks = 500;
+	const deadline = Date.now() + 60_000;
+	let chunkCount = 0;
+	try {
+		while (chunkCount < maxChunks && Date.now() < deadline) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			buffer += decoder.decode(value, { stream: true });
+			const { contents, buffer: nextBuffer } = parseSSEChunk(buffer);
+			buffer = nextBuffer;
+			for (const content of contents) {
+				if (content && content.trim().length > 0) {
+					chunkCount++;
+					await publishChunkToRealtime(env, roomId, content, userId, { chunk: true });
+				}
+			}
+		}
+		if (chunkCount >= maxChunks || Date.now() >= deadline) {
+			await publishChunkToRealtime(env, roomId, " [Response truncated.]", userId, { chunk: true });
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	await publishChunkToRealtime(env, roomId, "", userId, { complete: true });
 }
 
 /**

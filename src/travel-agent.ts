@@ -1,6 +1,7 @@
 import { Agent, callable } from "agents";
 import { Env } from "./types";
 import { AmadeusClient } from "./amadeus-client";
+import { runPipeline, type PipelineTripState } from "./pipeline";
 
 /**
  * Basic trip information
@@ -812,12 +813,8 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	 * @returns ReadableStream for streaming token-by-token responses
 	 */
 	/**
-	 * Handle message with streaming via Realtime
-	 * Streams chunks progressively to Realtime room via RealtimeConnector
-	 * @param input User's message input
-	 * @param roomId Realtime room ID to publish to
-	 * @param userId User ID
-	 * @returns Promise that resolves when streaming is complete
+	 * Handle message with streaming via Realtime.
+	 * Single door: webhook routes here; DO runs RAG + tools + LLM and streams via RealtimeConnector.
 	 */
 	@callable({ description: "Handle user message with RAG, tools, and LLM, streaming to Realtime" })
 	async handleMessageStreaming(
@@ -826,47 +823,59 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		userId?: string,
 	): Promise<{ success: boolean; message?: string; error?: string }> {
 		console.log("[TravelAgent] handleMessageStreaming: Starting");
-		
-		// Start handleMessage in the background (fire-and-forget)
-		// This allows the RPC call to return immediately, avoiding CPU time limits
-		// The work (RAG + tools + LLM + streaming) continues in the background
-		this.handleMessage(input)
-			.then((stream) => {
-				// Start streaming in the background (don't wait for completion)
-				return this.streamToRealtime(stream, roomId, userId);
-			})
-			.then(() => {
+
+		const tripState: PipelineTripState = {
+			basics: this.state.basics,
+			preferences: this.state.preferences,
+		};
+
+		// Run the shared pipeline inside this DO for direct RPC callers,
+		// then stream chunks to Realtime via this DO.
+		(async () => {
+			try {
+				const stream = await runPipeline(this.env as Env, input, tripState);
+				await this.streamToRealtime(stream, roomId, userId);
 				console.log("[TravelAgent] handleMessageStreaming: Streaming completed in background");
-			})
-			.catch((error) => {
+			} catch (error) {
 				console.error("[TravelAgent] handleMessageStreaming: Error in background processing:", error);
-				console.error("[TravelAgent] handleMessageStreaming: Error stack:", error instanceof Error ? error.stack : "No stack trace");
+				console.error(
+					"[TravelAgent] handleMessageStreaming: Error stack:",
+					error instanceof Error ? error.stack : "No stack trace",
+				);
 				// Try to publish error to Realtime
 				const realtimeConnector = (this.env as any).RealtimeConnector;
 				if (realtimeConnector) {
 					const connectorId = realtimeConnector.idFromName("main");
 					const stub = realtimeConnector.get(connectorId);
-					stub.fetch(
-						new Request("https://realtime-connector/publish", {
-							method: "POST",
-							headers: { "Content-Type": "application/json" },
-							body: JSON.stringify({
-								room: roomId,
-								message: {
-									type: "agent_response",
-									text: `Error: ${error instanceof Error ? error.message : "Streaming failed"}`,
-									userId: userId,
-									timestamp: Date.now(),
-									isError: true,
-								},
-					}),
-					}),
-				).catch((publishError: unknown) => {
-					console.error("[TravelAgent] handleMessageStreaming: Failed to publish error:", publishError);
-				});
+					try {
+						await stub.fetch(
+							new Request("https://realtime-connector/publish", {
+								method: "POST",
+								headers: { "Content-Type": "application/json" },
+								body: JSON.stringify({
+									room: roomId,
+									message: {
+										type: "agent_response",
+										text: `Error: ${
+											error instanceof Error ? error.message : "Streaming failed"
+										}`,
+										userId: userId,
+										timestamp: Date.now(),
+										isError: true,
+									},
+								}),
+							}),
+						);
+					} catch (publishError) {
+						console.error(
+							"[TravelAgent] handleMessageStreaming: Failed to publish error:",
+							publishError,
+						);
+					}
 				}
-			});
-		
+			}
+		})();
+
 		// Return immediately - all work happens in background
 		return { success: true, message: "Processing started" };
 	}
@@ -975,57 +984,21 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		// 2. Extract and update trip basics from message
 		this.extractTripInfo(input);
 
-		// 3. Run RAG and tools in parallel with timeouts to avoid CPU time limit errors
-		let context = "";
-		let toolResults = "";
-		const needsRAG = this.shouldUseRAG(input);
-		const needsTools = this.shouldUseTools(input);
+		// 3. Run shared Worker-style pipeline inside the DO for direct RPC callers
+		const tripState: PipelineTripState = {
+			basics: this.state.basics,
+			preferences: this.state.preferences,
+		};
 
-		const ragStartTime = Date.now();
-		const ragPromise = needsRAG
-			? (async () => {
-					console.error(`[handleMessage] Starting performRAG() at ${new Date().toISOString()}`);
-					const result = await Promise.race([
-						this.performRAG(input),
-						new Promise<string>((resolve) => setTimeout(() => resolve(""), 5000)), // 5s timeout
-					]);
-					console.error(`[handleMessage] performRAG() completed in ${Date.now() - ragStartTime}ms`);
-					return result;
-				})()
-			: Promise.resolve("");
-
-		const toolsStartTime = Date.now();
-		const toolsPromise = needsTools
-			? (async () => {
-					console.error(`[handleMessage] Starting useTools() at ${new Date().toISOString()}`);
-					const result = await Promise.race([
-						this.useTools(input),
-						new Promise<string>((resolve) => setTimeout(() => resolve(""), 10000)), // 10s timeout
-					]);
-					console.error(`[handleMessage] useTools() completed in ${Date.now() - toolsStartTime}ms`);
-					return result;
-				})()
-			: Promise.resolve("");
-
-		const parallelStartTime = Date.now();
-		const [ragResult, toolsResult] = await Promise.all([ragPromise, toolsPromise]);
-		context = ragResult;
-		toolResults = toolsResult;
-		console.error(`[handleMessage] RAG + Tools parallel completed in ${Date.now() - parallelStartTime}ms`);
-
-		// 4. Generate LLM response stream with context and tool results
-		const llmStartTime = Date.now();
-		console.error(`[handleMessage] Starting generateLLMResponse() at ${new Date().toISOString()}`);
 		let stream: ReadableStream;
 		try {
-			stream = await this.generateLLMResponse(input, context, toolResults);
-			console.error(`[handleMessage] generateLLMResponse() completed in ${Date.now() - llmStartTime}ms`);
-		} catch (llmError) {
-			console.error("[TravelAgent] handleMessage: Error in generateLLMResponse:", llmError);
-			throw llmError;
+			stream = await runPipeline(this.env as Env, input, tripState);
+		} catch (error) {
+			console.error("[TravelAgent] handleMessage: Error running pipeline:", error);
+			throw error;
 		}
 
-		// 5. Transform stream to accumulate full response for state
+		// 4. Transform stream to accumulate full response for state
 		const totalDuration = Date.now() - handleMessageStartTime;
 		console.error(`[handleMessage] Total execution time: ${totalDuration}ms`);
 		try {
