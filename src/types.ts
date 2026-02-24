@@ -3,18 +3,12 @@
  */
 
 export interface Env extends Cloudflare.Env {
-	//AI, ASSETS, TravelAgent, KVNAMESPACE and VECTORIZE are inherited from Cloudflare.Env
-	//RealtimeConnector is inherited from Cloudflare.Env after wrangler types
+	// AI, ASSETS, TravelAgent, KVNAMESPACE, VECTORIZE, AMADEUS_*, REALTIME_APP_ID, CLOUDFLARE_API_TOKEN from Cloudflare.Env (wrangler types)
 
-	AMADEUS_API_KEY: string;
-	AMADEUS_API_SECRET: string;
-	
-	// Realtime configuration
+	// Optional Realtime config (not in generated Env; REALTIME_APP_ID/CLOUDFLARE_API_TOKEN stay required to satisfy Cloudflare.Env)
 	REALTIME_API_TOKEN?: string;
 	REALTIME_NAMESPACE_ID?: string;
 	REALTIME_ACCOUNT_ID?: string;
-	REALTIME_APP_ID?: string;
-	CLOUDFLARE_API_TOKEN?: string;
 }
 
 /**

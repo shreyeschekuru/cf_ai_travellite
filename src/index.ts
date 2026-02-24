@@ -8,7 +8,6 @@
  * @license MIT
  */
 import { Env, ChatMessage, RealtimeWebhookEvent, RealtimeAgentResponse } from "./types";
-import { routeAgentRequest } from "agents";
 import { TravelAgent } from "./travel-agent";
 import { RealtimeConnector } from "./realtime-connector";
 
@@ -35,8 +34,6 @@ async function routeTravelAgentRequest(
 	const url = new URL(request.url);
 	console.log("[routeTravelAgentRequest] Checking path:", url.pathname);
 
-	// Explicit TravelAgent routing - handle before routeAgentRequest
-	// This ensures TravelAgent requests are routed correctly
 	if (url.pathname.startsWith("/agents/TravelAgent/")) {
 		console.log("[routeTravelAgentRequest] TravelAgent path detected");
 		// Extract session name from path: /agents/TravelAgent/{sessionName}/...
@@ -99,22 +96,12 @@ export default {
 	): Promise<Response> {
 		const url = new URL(request.url);
 
-		// Try Agent framework's built-in routing first
-		try {
-			const agentResponse = await routeAgentRequest(request, env);
+		// Route TravelAgent RPC and HTTP to the Durable Object
+		if (url.pathname.startsWith("/agents/TravelAgent/")) {
+			const agentResponse = await routeTravelAgentRequest(request, env);
 			if (agentResponse) {
-				console.log("[Main] routeAgentRequest handled the request");
 				return agentResponse;
 			}
-		} catch (error) {
-			console.error("[Main] routeAgentRequest error:", error);
-		}
-
-		// Fallback to explicit TravelAgent routing
-		// This ensures TravelAgent requests are routed correctly
-		const agentResponse = await routeTravelAgentRequest(request, env);
-		if (agentResponse) {
-			return agentResponse;
 		}
 
 		// Handle static assets (frontend)
