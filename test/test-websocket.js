@@ -1,12 +1,7 @@
 /**
- * WebSocket Gateway Test Script with Detailed Step-by-Step Logging
+ * WebSocket Gateway Test Script
  * 
- * Tests the Gateway WebSocket endpoint and shows exactly what happens at each step:
- * - Connection establishment
- * - Protocol messages
- * - Message sending
- * - Streaming chunks
- * - Complete responses
+ * Tests the Gateway WebSocket endpoint for low-latency realtime communication
  * 
  * Usage:
  *   npm run test:ws [userId]
@@ -25,9 +20,7 @@ const WebSocket = require('ws');
 const userId = process.argv[2] || 'test-user';
 const wsUrl = `ws://localhost:8787/api/gateway/ws?userId=${userId}`;
 
-console.log('═══════════════════════════════════════════════════════════════');
-console.log('  WebSocket Gateway Test - Detailed Step-by-Step Logging');
-console.log('═══════════════════════════════════════════════════════════════\n');
+console.log('Testing WebSocket Gateway');
 console.log(`Connecting to: ${wsUrl}`);
 console.log(`User ID: ${userId}\n`);
 
@@ -37,185 +30,77 @@ const ws = new WebSocket(wsUrl);
 // Track test results
 let responseCount = 0; // Count only actual agent responses
 let totalMessageCount = 0; // Count all messages (for debugging)
-let chunkCount = 0; // Count streaming chunks
-let isStreaming = false; // Track if we're currently receiving a stream
-let accumulatedText = ''; // Accumulate streaming text
-
 const testMessages = [
 	{ type: 'message', text: 'Hello, I want to plan a trip to Paris' },
-	{ type: 'message', text: 'Recommend budget travel strategies' },
 	{ type: 'message', text: 'What flights are available from NYC to Paris on December 1st?' },
+	{ type: 'message', text: 'What is my budget?' },
 ];
 
-// Step 1: Connection establishment
 ws.on('open', () => {
-	console.log('STEP 1: WebSocket connection established!\n');
-	console.log('Waiting for initial protocol messages...\n');
+	console.log('WebSocket connection established!\n');
+	console.log('Sending test messages...\n');
 	
 	// Wait a moment for initial protocol messages, then send first test message
-	setTimeout(() => {
-		console.log('Ready to send messages\n');
-		sendNextMessage();
-	}, 1000);
+	setTimeout(() => sendNextMessage(), 500);
 });
 
-// Step 2: Receiving messages
 ws.on('message', (data) => {
 	totalMessageCount++;
-	const timestamp = new Date().toISOString();
 	
 	try {
 		const response = JSON.parse(data.toString());
 		
 		// Filter out internal protocol messages from agents framework
+		// These include: cf_agent_identity, cf_agent_state, cf_agent_mcp_servers, etc.
 		if (response.type && response.type.startsWith('cf_agent_')) {
-			console.log(`STEP 2.${totalMessageCount}: Protocol Message`);
-			console.log(`   Type: ${response.type}`);
-			
-			if (response.type === 'cf_agent_identity') {
-				console.log(`   Agent: ${response.agent || 'unknown'}`);
-				console.log(`   Name: ${response.name || 'unknown'}`);
-			} else if (response.type === 'cf_agent_state') {
-				console.log(`   State: ${JSON.stringify(response.state, null, 2).substring(0, 200)}...`);
-			} else if (response.type === 'cf_agent_mcp_servers') {
-				console.log(`   MCP Servers: ${Object.keys(response.mcp?.servers || {}).length} configured`);
-			}
-			console.log();
+			// Internal protocol message - ignore for test purposes
+			console.log(`Protocol message (ignored): ${response.type}`);
 			return;
 		}
 		
-		// Handle agent responses
+		// Only process messages with type: "response" from our agent
 		if (response.type === 'response') {
-			// Check if this is a streaming response
-			if (response.streaming) {
-				console.log(`STEP 3: Streaming Started`);
-				console.log(`   Timestamp: ${timestamp}`);
-				console.log(`   User ID: ${response.userId || 'N/A'}`);
-				console.log(`   Status: Streaming in progress...\n`);
-				isStreaming = true;
-				chunkCount = 0;
-				accumulatedText = '';
-				return;
-			}
-			
-			// Check if this is a chunk
-			if (response.chunk) {
-				chunkCount++;
-				accumulatedText += response.text || '';
-				
-				console.log(`STEP 4.${chunkCount}: Streaming Chunk #${chunkCount}`);
-				console.log(`   Text: "${response.text}"`);
-				console.log(`   Accumulated: "${accumulatedText.substring(0, 50)}${accumulatedText.length > 50 ? '...' : ''}"`);
-				console.log(`   Length: ${accumulatedText.length} chars\n`);
-				return;
-			}
-			
-			// Check if this is the complete response
-			if (response.complete) {
-				responseCount++;
-				isStreaming = false;
-				
-				console.log(`STEP 5: Complete Response Received`);
-				console.log(`   Response #${responseCount}`);
-				console.log(`   Total Chunks: ${chunkCount}`);
-				console.log(`   Total Length: ${response.text?.length || 0} characters`);
-				console.log(`   Timestamp: ${timestamp}`);
-				console.log(`   User ID: ${response.userId || 'N/A'}`);
-				console.log(`\n   Full Response:`);
-				console.log(`   ┌─────────────────────────────────────────────────────────┐`);
-				const lines = (response.text || '').split('\n');
-				lines.forEach(line => {
-					console.log(`   │ ${line.substring(0, 55).padEnd(55)} │`);
-				});
-				console.log(`   └─────────────────────────────────────────────────────────┘\n`);
-				
-				// Reset for next message
-				chunkCount = 0;
-				accumulatedText = '';
-				
-				// Send next message if available
-				if (responseCount < testMessages.length) {
-					console.log(`Waiting 2 seconds before next message...\n`);
-					setTimeout(() => sendNextMessage(), 2000);
-				} else {
-					console.log('═══════════════════════════════════════════════════════════════');
-					console.log('  Test Complete - Summary');
-					console.log('═══════════════════════════════════════════════════════════════');
-					console.log(`Total Messages Sent: ${testMessages.length}`);
-					console.log(`Total Responses Received: ${responseCount}`);
-					console.log(`Total Messages (including protocol): ${totalMessageCount}`);
-					console.log(`Streaming: ${isStreaming ? 'Active' : 'Complete'}`);
-					console.log('\nClosing connection...\n');
-					setTimeout(() => ws.close(), 500);
-				}
-				return;
-			}
-			
-			// Handle error responses
-			if (response.error) {
-				responseCount++;
-				console.log(`STEP 5: Error Response`);
-				console.log(`   Response #${responseCount}`);
-				console.log(`   Error: ${response.error}`);
-				console.log(`   Timestamp: ${timestamp}\n`);
-				
-				// Send next message if available
-				if (responseCount < testMessages.length) {
-					setTimeout(() => sendNextMessage(), 2000);
-				} else {
-					console.log('Test complete (with errors)');
-					setTimeout(() => ws.close(), 500);
-				}
-				return;
-			}
-			
-			// Fallback: regular response (non-streaming)
 			responseCount++;
-			console.log(`STEP 4: Response Received (Non-Streaming)`);
-			console.log(`   Response #${responseCount}`);
-			console.log(`   Text: ${response.text}`);
-			console.log(`   Timestamp: ${timestamp}\n`);
+			
+			console.log(`Agent Response #${responseCount}:`);
+			
+			if (response.error) {
+				console.log('   Error:', response.error);
+			} else {
+				console.log('   Text:', response.text);
+				if (response.userId) {
+					console.log('   User ID:', response.userId);
+				}
+			}
+			console.log();
 			
 			// Send next message if available
 			if (responseCount < testMessages.length) {
-				setTimeout(() => sendNextMessage(), 2000);
+				setTimeout(() => sendNextMessage(), 1000); // Wait 1 second between messages
 			} else {
 				console.log('All test messages sent and received!');
+				console.log(`Total messages received: ${totalMessageCount} (${responseCount} agent responses)`);
+				console.log('Closing connection...');
 				setTimeout(() => ws.close(), 500);
 			}
 		} else {
 			// Unknown message type - log for debugging
-			console.log(`STEP X: Unknown Message Type`);
-			console.log(`   Type: ${response.type}`);
-			console.log(`   Full response:`, JSON.stringify(response, null, 2));
-			console.log();
+			console.log(`Unknown message type: ${response.type}`);
+			console.log('   Full response:', JSON.stringify(response, null, 2));
 		}
 	} catch (error) {
-		console.error('❌ Error parsing response:', error);
-		console.error('   Raw data:', data.toString().substring(0, 200));
-		console.log();
+		console.error('Error parsing response:', error);
+		console.error('   Raw data:', data.toString());
 	}
 });
 
 ws.on('error', (error) => {
-	console.error('═══════════════════════════════════════════════════════════════');
-	console.error('  WebSocket Error');
-	console.error('═══════════════════════════════════════════════════════════════');
-	console.error(`   Error: ${error.message}`);
-	console.error(`   Code: ${error.code || 'N/A'}`);
-	console.error();
+	console.error('WebSocket error:', error.message);
 	process.exit(1);
 });
 
 ws.on('close', (code, reason) => {
-	console.log('═══════════════════════════════════════════════════════════════');
-	console.log('  Connection Closed');
-	console.log('═══════════════════════════════════════════════════════════════');
-	console.log(`   Code: ${code}`);
-	console.log(`   Reason: ${reason || 'Normal closure'}`);
-	console.log(`   Total Messages: ${totalMessageCount}`);
-	console.log(`   Responses: ${responseCount}`);
-	console.log();
+	console.log(`Connection closed (code: ${code}, reason: ${reason || 'none'})`);
 	process.exit(0);
 });
 
@@ -225,12 +110,9 @@ function sendNextMessage() {
 	}
 	
 	const message = testMessages[responseCount];
-	console.log('═══════════════════════════════════════════════════════════════');
-	console.log(`  Sending Message #${responseCount + 1}`);
-	console.log('═══════════════════════════════════════════════════════════════');
-	console.log(`   Type: ${message.type}`);
-	console.log(`   Text: "${message.text}"`);
-	console.log(`   Timestamp: ${new Date().toISOString()}`);
+	console.log(`Sending message #${responseCount + 1}:`);
+	console.log('   Type:', message.type);
+	console.log('   Text:', message.text);
 	console.log();
 	
 	ws.send(JSON.stringify(message));
@@ -238,8 +120,7 @@ function sendNextMessage() {
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {
-	console.log('\n\nInterrupted by user');
-	console.log('Closing connection...\n');
+	console.log('\nShutting down...');
 	ws.close();
 	process.exit(0);
 });

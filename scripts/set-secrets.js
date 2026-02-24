@@ -132,10 +132,16 @@ async function main() {
 	
 	const vars = readDevVars();
 	
+	// Required secrets (must be present)
 	const requiredSecrets = ['AMADEUS_API_KEY', 'AMADEUS_API_SECRET'];
+	
+	// Optional secrets (will be set if present, but won't fail if missing)
+	const optionalSecrets = ['REALTIME_APP_ID', 'CLOUDFLARE_API_TOKEN', 'REALTIME_API_TOKEN', 'REALTIME_NAMESPACE_ID', 'REALTIME_ACCOUNT_ID'];
+	
 	let successCount = 0;
 	let failCount = 0;
 	
+	// Set required secrets (fail if missing)
 	for (const secretKey of requiredSecrets) {
 		if (vars[secretKey]) {
 			const success = await setSecret(secretKey, vars[secretKey]);
@@ -147,6 +153,21 @@ async function main() {
 		} else {
 			console.log(`   ⚠️  ${secretKey} not found in .dev.vars`);
 			failCount++;
+		}
+	}
+	
+	// Set optional secrets (skip if missing)
+	for (const secretKey of optionalSecrets) {
+		if (vars[secretKey]) {
+			const success = await setSecret(secretKey, vars[secretKey]);
+			if (success) {
+				successCount++;
+			} else {
+				console.log(`   ⚠️  Failed to set optional secret ${secretKey}, continuing...`);
+				// Don't increment failCount for optional secrets
+			}
+		} else {
+			console.log(`   ℹ️  ${secretKey} not found in .dev.vars (optional, skipping)`);
 		}
 	}
 	

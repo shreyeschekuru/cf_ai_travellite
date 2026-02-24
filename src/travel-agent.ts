@@ -82,24 +82,87 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	}
 
 	/**
+	 * Override fetch to handle requests (PartyKit Agent may use fetch instead of onRequest)
+	 * This MUST be called for all requests to reach our onRequest handler
+	 */
+	async fetch(request: Request): Promise<Response> {
+		console.log("[TravelAgent] fetch called, method:", request.method, "url:", request.url);
+		console.log("[TravelAgent] fetch - Request pathname:", new URL(request.url).pathname);
+		
+		// Always call onRequest for RPC handling
+		// Don't call super.fetch() as it might have routing that returns 404
+		return this.onRequest(request);
+	}
+
+	/**
 	 * Handle HTTP requests (including RPC requests)
 	 * Implements RPC handling for @callable methods
 	 */
 	async onRequest(request: Request): Promise<Response> {
+		console.log("[TravelAgent] onRequest called, method:", request.method, "url:", request.url);
+		
 		// Check if this is an RPC request
 		if (request.method === "POST") {
 			try {
-				const rpcData = (await request.json()) as {
+				const body = await request.text();
+				console.log("[TravelAgent] Request body:", body.substring(0, 200));
+				const rpcData = JSON.parse(body) as {
 					type: string;
 					id: string;
 					method: string;
 					args: unknown[];
 				};
+				console.log("[TravelAgent] Parsed RPC data:", rpcData.type, rpcData.method);
 
 				if (rpcData.type === "rpc" && rpcData.method) {
 					console.log("[TravelAgent] RPC call received:", rpcData.method, "with args:", rpcData.args);
-					// Find the callable method
-					const method = (this as any)[rpcData.method];
+					
+					// Try multiple lookup strategies
+					let method: ((...args: any[]) => any) | undefined;
+					
+					// Strategy 1: Direct property access
+					method = (this as any)[rpcData.method];
+					
+					// Strategy 2: Prototype lookup if direct access failed
+					if (!method || typeof method !== "function") {
+						const prototype = Object.getPrototypeOf(this) as any;
+						method = prototype[rpcData.method];
+					}
+					
+					// Strategy 3: Check known methods explicitly
+					if (!method || typeof method !== "function") {
+						switch (rpcData.method) {
+							case "testLLMRAGTools":
+								method = this.testLLMRAGTools;
+								break;
+							case "handleMessage":
+								method = this.handleMessage;
+								break;
+							case "handleMessageStreaming":
+								method = this.handleMessageStreaming;
+								break;
+							case "callAmadeusAPI":
+								method = this.callAmadeusAPI;
+								break;
+						}
+					}
+					
+					// Bind the method if found
+					if (method && typeof method === "function") {
+						method = method.bind(this);
+					}
+					
+					// Debug: List all available methods if method not found
+					if (!method || typeof method !== "function") {
+						const prototypeMethods = Object.getOwnPropertyNames(Object.getPrototypeOf(this))
+							.filter(name => name !== 'constructor' && typeof (this as any)[name] === 'function');
+						console.log("[TravelAgent] Prototype methods:", prototypeMethods);
+						console.log("[TravelAgent] Looking for method:", rpcData.method);
+						console.log("[TravelAgent] Method exists on this?", typeof (this as any)[rpcData.method]);
+						console.log("[TravelAgent] testLLMRAGTools exists?", typeof this.testLLMRAGTools);
+						console.log("[TravelAgent] All instance properties:", Object.getOwnPropertyNames(this));
+					}
+					
 					if (method && typeof method === "function") {
 						console.log("[TravelAgent] Method found, calling...");
 						try {
@@ -156,7 +219,23 @@ export class TravelAgent extends Agent<Env, TravelState> {
 			}
 		}
 
+		// For non-RPC requests, check if it's a path we should handle
+		// If the path ends with /rpc, it's definitely an RPC request that failed parsing
+		const url = new URL(request.url);
+		if (url.pathname.endsWith("/rpc") && request.method === "POST") {
+			console.log("[TravelAgent] Path ends with /rpc but RPC parsing failed, returning error");
+			return Response.json(
+				{
+					type: "rpc",
+					success: false,
+					error: "Invalid RPC request format",
+				},
+				{ status: 400 }
+			);
+		}
+		
 		// For non-RPC requests, return 404
+		console.log("[TravelAgent] Non-RPC request, returning 404. Path:", url.pathname, "Method:", request.method);
 		return new Response("Not found", { status: 404 });
 	}
 
@@ -259,8 +338,8 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		
 		const reader = stream.getReader();
 		const decoder = new TextDecoder();
-		let accumulatedText = "";
 		let chunkCount = 0;
+		// Don't accumulate full text to avoid memory issues - just stream chunks
 
 		try {
 			// Get RealtimeConnector to publish chunks
@@ -327,7 +406,6 @@ export class TravelAgent extends Agent<Env, TravelState> {
 					try {
 						const finalChunk = decoder.decode();
 						if (finalChunk && finalChunk.trim().length > 0) {
-							accumulatedText += finalChunk;
 							chunkCount++;
 							// Publish final chunk
 							await stub.fetch(
@@ -351,7 +429,7 @@ export class TravelAgent extends Agent<Env, TravelState> {
 						console.error("[TravelAgent] Error decoding final chunk:", decodeError);
 					}
 
-					// Publish final complete response
+					// Publish final complete message (without full text to save memory)
 					await stub.fetch(
 						new Request("https://realtime-connector/publish", {
 							method: "POST",
@@ -360,7 +438,7 @@ export class TravelAgent extends Agent<Env, TravelState> {
 								room: roomId,
 								message: {
 									type: "agent_response",
-									text: accumulatedText,
+									text: "", // Don't send full text to avoid memory issues
 									userId: userId,
 									timestamp: Date.now(),
 									complete: true,
@@ -368,7 +446,7 @@ export class TravelAgent extends Agent<Env, TravelState> {
 							}),
 						}),
 					);
-					console.log(`[TravelAgent] streamToRealtime: Stream complete. Total chunks: ${chunkCount}, Total length: ${accumulatedText.length}`);
+					console.log(`[TravelAgent] streamToRealtime: Stream complete. Total chunks: ${chunkCount}`);
 					break;
 				}
 
@@ -377,7 +455,6 @@ export class TravelAgent extends Agent<Env, TravelState> {
 				
 				// Only send non-empty chunks
 				if (chunk && chunk.trim().length > 0) {
-					accumulatedText += chunk;
 					chunkCount++;
 					
 					// Publish chunk immediately
@@ -450,12 +527,14 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	/**
 	 * Accumulate a ReadableStream into a complete string
 	 * Used for RPC calls that need the full response (backward compatibility)
+	 * Added memory limit to prevent Durable Object memory exhaustion
 	 */
-	private async accumulateStream(stream: ReadableStream): Promise<string> {
+	private async accumulateStream(stream: ReadableStream, maxLength: number = 10000): Promise<string> {
 		const reader = stream.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
 		let accumulatedText = "";
+		let totalLength = 0;
 
 		try {
 			while (true) {
@@ -466,7 +545,13 @@ export class TravelAgent extends Agent<Env, TravelState> {
 					if (buffer) {
 						const parsed = this.parseSSEChunk(buffer);
 						for (const content of parsed.contents) {
+							if (totalLength + content.length > maxLength) {
+								accumulatedText += content.substring(0, maxLength - totalLength);
+								console.warn(`[TravelAgent] accumulateStream: Reached memory limit (${maxLength} chars), truncating`);
+								break;
+							}
 							accumulatedText += content;
+							totalLength += content.length;
 						}
 					}
 					break;
@@ -477,9 +562,20 @@ export class TravelAgent extends Agent<Env, TravelState> {
 				const parsed = this.parseSSEChunk(buffer);
 				buffer = parsed.buffer;
 
-				// Accumulate each content chunk
+				// Accumulate each content chunk with memory limit
 				for (const content of parsed.contents) {
+					if (totalLength + content.length > maxLength) {
+						accumulatedText += content.substring(0, maxLength - totalLength);
+						console.warn(`[TravelAgent] accumulateStream: Reached memory limit (${maxLength} chars), truncating`);
+						break;
+					}
 					accumulatedText += content;
+					totalLength += content.length;
+				}
+				
+				// Break if we've reached the limit
+				if (totalLength >= maxLength) {
+					break;
 				}
 			}
 		} finally {
@@ -721,21 +817,135 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	): Promise<{ success: boolean; message?: string; error?: string }> {
 		console.log("[TravelAgent] handleMessageStreaming: Starting");
 		
+		// Start handleMessage in the background (fire-and-forget)
+		// This allows the RPC call to return immediately, avoiding CPU time limits
+		// The work (RAG + tools + LLM + streaming) continues in the background
+		this.handleMessage(input)
+			.then((stream) => {
+				// Start streaming in the background (don't wait for completion)
+				return this.streamToRealtime(stream, roomId, userId);
+			})
+			.then(() => {
+				console.log("[TravelAgent] handleMessageStreaming: Streaming completed in background");
+			})
+			.catch((error) => {
+				console.error("[TravelAgent] handleMessageStreaming: Error in background processing:", error);
+				console.error("[TravelAgent] handleMessageStreaming: Error stack:", error instanceof Error ? error.stack : "No stack trace");
+				// Try to publish error to Realtime
+				const realtimeConnector = (this.env as any).RealtimeConnector;
+				if (realtimeConnector) {
+					const connectorId = realtimeConnector.idFromName("main");
+					const stub = realtimeConnector.get(connectorId);
+					stub.fetch(
+						new Request("https://realtime-connector/publish", {
+							method: "POST",
+							headers: { "Content-Type": "application/json" },
+							body: JSON.stringify({
+								room: roomId,
+								message: {
+									type: "agent_response",
+									text: `Error: ${error instanceof Error ? error.message : "Streaming failed"}`,
+									userId: userId,
+									timestamp: Date.now(),
+									isError: true,
+								},
+					}),
+					}),
+				).catch((publishError: unknown) => {
+					console.error("[TravelAgent] handleMessageStreaming: Failed to publish error:", publishError);
+				});
+				}
+			});
+		
+		// Return immediately - all work happens in background
+		return { success: true, message: "Processing started" };
+	}
+
+	@callable({ description: "Test LLM, RAG, and tools without accumulating full response" })
+	async testLLMRAGTools(input: string): Promise<{ 
+		success: boolean; 
+		ragTriggered: boolean; 
+		toolsTriggered: boolean; 
+		ragContextLength: number; 
+		toolResultsLength: number; 
+		llmStarted: boolean;
+		preview: string;
+	}> {
+		console.log("[TravelAgent] testLLMRAGTools: Starting, input:", input.substring(0, 50));
+		
+		// 1. Check if RAG and tools are needed
+		const needsRAG = this.shouldUseRAG(input);
+		const needsTools = this.shouldUseTools(input);
+		console.log("[TravelAgent] testLLMRAGTools: RAG needed:", needsRAG, "Tools needed:", needsTools);
+
+		// 2. Run RAG and tools in parallel with timeouts
+		const ragPromise = needsRAG
+			? Promise.race([
+					this.performRAG(input),
+					new Promise<string>((resolve) => setTimeout(() => resolve(""), 5000)),
+				])
+			: Promise.resolve("");
+
+		const toolsPromise = needsTools
+			? Promise.race([
+					this.useTools(input),
+					new Promise<string>((resolve) => setTimeout(() => resolve(""), 10000)),
+				])
+			: Promise.resolve("");
+
+		console.log("[TravelAgent] testLLMRAGTools: Running RAG and tools in parallel...");
+		const [ragResult, toolsResult] = await Promise.all([ragPromise, toolsPromise]);
+		
+		console.log("[TravelAgent] testLLMRAGTools: RAG context length:", ragResult.length, "Tool results length:", toolsResult.length);
+
+		// 3. Test LLM generation (just get a small preview, don't accumulate full response)
+		let llmStarted = false;
+		let preview = "";
+		
 		try {
-			// Get the stream from handleMessage
-			const stream = await this.handleMessage(input);
+			console.log("[TravelAgent] testLLMRAGTools: Testing LLM generation...");
+			const stream = await this.generateLLMResponse(input, ragResult, toolsResult);
+			llmStarted = true;
 			
-			// Stream chunks to Realtime via RealtimeConnector
-			await this.streamToRealtime(stream, roomId, userId);
+			// Read just the first few chunks to verify LLM is working
+			const reader = stream.getReader();
+			const decoder = new TextDecoder();
+			let chunkCount = 0;
+			const maxChunks = 5; // Only read first 5 chunks
 			
-			return { success: true, message: "Streaming completed" };
+			try {
+				while (chunkCount < maxChunks) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					
+					const chunk = decoder.decode(value, { stream: true });
+					preview += chunk;
+					chunkCount++;
+					
+					// Limit preview to 500 chars
+					if (preview.length > 500) {
+						preview = preview.substring(0, 500) + "...";
+						break;
+					}
+				}
+			} finally {
+				reader.releaseLock();
+			}
+			
+			console.log("[TravelAgent] testLLMRAGTools: LLM preview length:", preview.length);
 		} catch (error) {
-			console.error("[TravelAgent] handleMessageStreaming: Error:", error);
-			return {
-				success: false,
-				error: error instanceof Error ? error.message : "Failed to process message",
-			};
+			console.error("[TravelAgent] testLLMRAGTools: LLM error:", error);
 		}
+
+		return {
+			success: true,
+			ragTriggered: needsRAG,
+			toolsTriggered: needsTools,
+			ragContextLength: ragResult.length,
+			toolResultsLength: toolsResult.length,
+			llmStarted: llmStarted,
+			preview: preview,
+		};
 	}
 
 	@callable({ description: "Handle user message with RAG, tools, and LLM" })
@@ -757,28 +967,37 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		this.extractTripInfo(input);
 
 		// 3. Decide on routing: RAG + Tools + LLM
+		// Run RAG and tools in parallel to reduce total time
 		let context = "";
 		let toolResults = "";
 
-		// Check if we need RAG (Vectorize search)
-		console.log("[TravelAgent] handleMessage: Step 3a - Checking if RAG needed");
+		// Check if we need RAG and tools
+		console.log("[TravelAgent] handleMessage: Step 3 - Checking if RAG/tools needed");
 		const needsRAG = this.shouldUseRAG(input);
-		console.log("[TravelAgent] handleMessage: RAG needed:", needsRAG);
-		if (needsRAG) {
-			console.log("[TravelAgent] handleMessage: Performing RAG search");
-			context = await this.performRAG(input);
-			console.log("[TravelAgent] handleMessage: RAG context length:", context.length);
-		}
-
-		// Check if we need tools (Amadeus API)
-		console.log("[TravelAgent] handleMessage: Step 3b - Checking if tools needed");
 		const needsTools = this.shouldUseTools(input);
-		console.log("[TravelAgent] handleMessage: Tools needed:", needsTools);
-		if (needsTools) {
-			console.log("[TravelAgent] handleMessage: Calling tools");
-			toolResults = await this.useTools(input);
-			console.log("[TravelAgent] handleMessage: Tool results length:", toolResults.length);
-		}
+		console.log("[TravelAgent] handleMessage: RAG needed:", needsRAG, "Tools needed:", needsTools);
+
+		// Run RAG and tools in parallel with timeouts to avoid CPU limit issues
+		const ragPromise = needsRAG
+			? Promise.race([
+					this.performRAG(input),
+					new Promise<string>((resolve) => setTimeout(() => resolve(""), 5000)), // 5s timeout
+				])
+			: Promise.resolve("");
+
+		const toolsPromise = needsTools
+			? Promise.race([
+					this.useTools(input),
+					new Promise<string>((resolve) => setTimeout(() => resolve(""), 10000)), // 10s timeout
+				])
+			: Promise.resolve("");
+
+		// Wait for both in parallel
+		console.log("[TravelAgent] handleMessage: Running RAG and tools in parallel...");
+		const [ragResult, toolsResult] = await Promise.all([ragPromise, toolsPromise]);
+		context = ragResult;
+		toolResults = toolsResult;
+		console.log("[TravelAgent] handleMessage: RAG context length:", context.length, "Tool results length:", toolResults.length);
 
 		// 4. Generate LLM response stream with context and tool results
 		console.log("[TravelAgent] handleMessage: Step 4 - Generating LLM response");
