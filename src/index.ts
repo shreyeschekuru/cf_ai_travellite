@@ -49,16 +49,24 @@ export default {
 				const headers = new Headers(request.headers);
 				headers.set("x-partykit-room", sessionName);
 				
-				// Clone the request first to get a fresh copy of the body
-				// Then create a new request with modified headers
-				const clonedRequest = request.clone();
-				const body = await clonedRequest.arrayBuffer();
+				// Only read and include body for methods that support it (POST, PUT, PATCH, etc.)
+				// GET/HEAD/DELETE/OPTIONS requests cannot have a body
+				const methodsWithBody = ["POST", "PUT", "PATCH"];
+				const hasBody = methodsWithBody.includes(request.method);
 				
-				const modifiedRequest = new Request(request.url, {
+				// Create request options - only include body if method supports it
+				const requestOptions: RequestInit = {
 					method: request.method,
 					headers: headers,
-					body: body,
-				});
+				};
+				
+				// Only read body for methods that support it
+				if (hasBody) {
+					const clonedRequest = request.clone();
+					requestOptions.body = await clonedRequest.arrayBuffer();
+				}
+				
+				const modifiedRequest = new Request(request.url, requestOptions);
 				
 				return stub.fetch(modifiedRequest);
 			}

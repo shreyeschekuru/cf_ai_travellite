@@ -87,11 +87,51 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	}
 
 	/**
+	 * Override fetch to ensure our logging is called
+	 * This ensures logs appear even if Agent base class intercepts
+	 */
+	async fetch(request: Request): Promise<Response> {
+		console.error(`[TravelAgent.fetch] Received ${request.method} request to ${request.url}`);
+		const response = await this.onRequest(request);
+		console.error(`[TravelAgent.fetch] Returning response with status ${response.status}`);
+		return response;
+	}
+
+	/**
 	 * Handle HTTP requests (including RPC requests)
 	 * Implements RPC handling for @callable methods
 	 */
 	async onRequest(request: Request): Promise<Response> {
-		// Check if this is an RPC request
+		console.error(`[TravelAgent.onRequest] Received ${request.method} request to ${request.url}`);
+		
+		// Handle GET requests - return method not allowed or endpoint info
+		if (request.method === "GET") {
+			const url = new URL(request.url);
+			if (url.pathname.endsWith("/rpc")) {
+				// Return helpful information about the RPC endpoint
+				return Response.json(
+					{
+						error: "Method Not Allowed",
+						message: "RPC endpoints only accept POST requests",
+						usage: {
+							method: "POST",
+							contentType: "application/json",
+							body: {
+								type: "rpc",
+								id: "unique-request-id",
+								method: "methodName",
+								args: ["arg1", "arg2"],
+							},
+						},
+					},
+					{ status: 405, headers: { Allow: "POST" } }
+				);
+			}
+			// For other GET requests, return 404
+			return new Response("Not found", { status: 404 });
+		}
+
+		// Check if this is an RPC request (POST only)
 		if (request.method === "POST") {
 			try {
 				const rpcData = (await request.json()) as {
@@ -101,13 +141,18 @@ export class TravelAgent extends Agent<Env, TravelState> {
 					args: unknown[];
 				};
 
+				console.error(`[TravelAgent.onRequest] RPC call: method=${rpcData.method}, id=${rpcData.id}`);
+
 				if (rpcData.type === "rpc" && rpcData.method) {
 					// Find the callable method
 					const method = (this as any)[rpcData.method];
+					console.error(`[TravelAgent.onRequest] Method lookup: method=${rpcData.method}, found=${!!method}, isFunction=${method && typeof method === "function"}`);
 					if (method && typeof method === "function") {
 						try {
+							console.error(`[TravelAgent.onRequest] Calling method ${rpcData.method} with args:`, JSON.stringify(rpcData.args));
 							// Call the method with the provided arguments
 							const result = await method.apply(this, rpcData.args);
+							console.error(`[TravelAgent.onRequest] Method ${rpcData.method} returned successfully`);
 
 							// Return RPC response
 							return Response.json({
@@ -117,6 +162,7 @@ export class TravelAgent extends Agent<Env, TravelState> {
 								result: result,
 							});
 						} catch (error) {
+							console.error(`[TravelAgent.onRequest] Error calling method ${rpcData.method}:`, error);
 							return Response.json(
 								{
 									type: "rpc",
@@ -145,7 +191,7 @@ export class TravelAgent extends Agent<Env, TravelState> {
 			}
 		}
 
-		// For non-RPC requests, return 404
+		// For other non-RPC requests, return 404
 		return new Response("Not found", { status: 404 });
 	}
 
@@ -382,6 +428,9 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	 */
 	@callable({ description: "Handle user message with RAG, tools, and LLM" })
 	async handleMessage(input: string): Promise<string> {
+		const handleMessageStartTime = Date.now();
+		console.error(`[handleMessage] Starting handleMessage() at ${new Date().toISOString()}`);
+		
 		// 1. Update state with user message
 		this.setState({
 			...this.state,
@@ -395,27 +444,75 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		this.extractTripInfo(input);
 
 		// 3. Decide on routing: RAG + Tools + LLM
+		// Run RAG and tools in parallel with timeouts to avoid CPU time limit errors
 		let context = "";
 		let toolResults = "";
 
-		// Check if we need RAG (Vectorize search)
+		// Check if we need RAG and tools
 		const needsRAG = this.shouldUseRAG(input);
-		if (needsRAG) {
-			context = await this.performRAG(input);
-		}
-
-		// Check if we need tools (Amadeus API)
 		const needsTools = this.shouldUseTools(input);
-		if (needsTools) {
-			toolResults = await this.useTools(input);
-		}
 
-		// 4. Generate LLM response with context and tool results
-		const response = await this.generateLLMResponse(
-			input,
-			context,
-			toolResults,
+		// Run RAG and tools in parallel with timeouts
+		const ragStartTime = Date.now();
+		const ragPromise = needsRAG
+			? (async () => {
+					console.error(`[handleMessage] Starting performRAG() at ${new Date().toISOString()}`);
+					const result = await Promise.race([
+						this.performRAG(input),
+						new Promise<string>((resolve) => setTimeout(() => resolve(""), 5000)), // 5s timeout
+					]);
+					const ragDuration = Date.now() - ragStartTime;
+					console.error(`[handleMessage] performRAG() completed in ${ragDuration}ms`);
+					return result;
+				})()
+			: Promise.resolve("");
+
+		const toolsStartTime = Date.now();
+		const toolsPromise = needsTools
+			? (async () => {
+					console.error(`[handleMessage] Starting useTools() at ${new Date().toISOString()}`);
+					const result = await Promise.race([
+						this.useTools(input),
+						new Promise<string>((resolve) => setTimeout(() => resolve(""), 10000)), // 10s timeout
+					]);
+					const toolsDuration = Date.now() - toolsStartTime;
+					console.error(`[handleMessage] useTools() completed in ${toolsDuration}ms`);
+					return result;
+				})()
+			: Promise.resolve("");
+
+		// Wait for both in parallel
+		const parallelStartTime = Date.now();
+		const [ragResult, toolsResult] = await Promise.all([ragPromise, toolsPromise]);
+		const parallelDuration = Date.now() - parallelStartTime;
+		console.error(`[handleMessage] RAG + Tools parallel execution completed in ${parallelDuration}ms`);
+		context = ragResult;
+		toolResults = toolsResult;
+
+		// 4. Generate LLM response with context and tool results (with timeout)
+		const llmStartTime = Date.now();
+		console.error(`[handleMessage] Starting generateLLMResponse() at ${new Date().toISOString()}`);
+		const llmPromise = (async () => {
+			const result = await this.generateLLMResponse(
+				input,
+				context,
+				toolResults,
+			);
+			const llmDuration = Date.now() - llmStartTime;
+			console.error(`[handleMessage] generateLLMResponse() completed in ${llmDuration}ms`);
+			return result;
+		})();
+		
+		const llmTimeout = new Promise<string>((resolve) => 
+			setTimeout(() => {
+				console.error(`[handleMessage] generateLLMResponse() timed out after 15s`);
+				resolve("I apologize, but the response generation took too long. Please try again with a simpler query.");
+			}, 15000) // 15s timeout
 		);
+		const response = await Promise.race([llmPromise, llmTimeout]);
+		
+		const totalDuration = Date.now() - handleMessageStartTime;
+		console.error(`[handleMessage] Total execution time: ${totalDuration}ms`);
 
 		// 5. Update state with assistant response
 		this.setState({
