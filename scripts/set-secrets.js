@@ -176,6 +176,7 @@ async function main() {
 	console.log(`   ❌ Failed: ${failCount}\n`);
 	
 	if (failCount > 0) {
+		console.log('   💡 If secrets fail with "latest version isn\'t deployed", run: npm run deploy');
 		process.exit(1);
 	}
 }
