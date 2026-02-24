@@ -13,6 +13,8 @@ export interface Env extends Cloudflare.Env {
 	REALTIME_API_TOKEN?: string;
 	REALTIME_NAMESPACE_ID?: string;
 	REALTIME_ACCOUNT_ID?: string;
+	REALTIME_APP_ID?: string;
+	CLOUDFLARE_API_TOKEN?: string;
 }
 
 /**

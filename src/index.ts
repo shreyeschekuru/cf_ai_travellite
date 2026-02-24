@@ -24,6 +24,70 @@ const MODEL_ID = "@cf/meta/llama-3.1-8b-instruct-fp8";
 const SYSTEM_PROMPT =
 	"You are a helpful, friendly assistant. Provide concise and accurate responses.";
 
+/**
+ * Helper function to route TravelAgent requests to the Durable Object
+ * This is the working pattern that routes correctly
+ */
+async function routeTravelAgentRequest(
+	request: Request,
+	env: Env,
+): Promise<Response | null> {
+	const url = new URL(request.url);
+	console.log("[routeTravelAgentRequest] Checking path:", url.pathname);
+
+	// Explicit TravelAgent routing - handle before routeAgentRequest
+	// This ensures TravelAgent requests are routed correctly
+	if (url.pathname.startsWith("/agents/TravelAgent/")) {
+		console.log("[routeTravelAgentRequest] TravelAgent path detected");
+		// Extract session name from path: /agents/TravelAgent/{sessionName}/...
+		const pathParts = url.pathname.split("/");
+		if (pathParts.length >= 4) {
+			const sessionName = pathParts[3];
+			console.log("[routeTravelAgentRequest] Session name:", sessionName);
+			const agentId = env.TravelAgent.idFromName(sessionName);
+			const stub = env.TravelAgent.get(agentId);
+			console.log("[routeTravelAgentRequest] Stub ID:", stub.id.toString());
+			
+			// Add PartyServer-required headers
+			const headers = new Headers(request.headers);
+			headers.set("x-partykit-room", sessionName);
+			
+			// Only read and include body for methods that support it (POST, PUT, PATCH)
+			const methodsWithBody = ["POST", "PUT", "PATCH"];
+			const hasBody = methodsWithBody.includes(request.method);
+			let body: ArrayBuffer | null = null;
+			if (hasBody) {
+				try {
+					const clonedRequest = request.clone();
+					body = await clonedRequest.arrayBuffer();
+					console.log("[routeTravelAgentRequest] Body read successfully, length:", body.byteLength);
+				} catch (error) {
+					console.error("[routeTravelAgentRequest] Error reading body:", error);
+					body = null;
+				}
+			}
+
+			// Construct a valid URL with dummy base (DO stub requires absolute URL)
+			const doPath = url.pathname + (url.search || "");
+			const doUrl = new URL(doPath, "https://dummy").toString();
+			const modifiedRequest = new Request(doUrl, {
+				method: request.method,
+				headers: headers,
+				body: body,
+			});
+			
+			console.log("[routeTravelAgentRequest] Calling stub.fetch()...");
+			console.log("[routeTravelAgentRequest] DO Request URL:", modifiedRequest.url);
+			console.log("[routeTravelAgentRequest] Request method:", modifiedRequest.method);
+			const response = await stub.fetch(modifiedRequest);
+			console.log("[routeTravelAgentRequest] stub.fetch() completed, status:", response.status);
+			return response;
+		}
+	}
+	console.log("[routeTravelAgentRequest] Not a TravelAgent path, returning null");
+	return null;
+}
+
 export default {
 	/**
 	 * Main request handler for the Worker
@@ -35,66 +99,33 @@ export default {
 	): Promise<Response> {
 		const url = new URL(request.url);
 
-		// Explicit TravelAgent routing - handle before routeAgentRequest
-		// This ensures TravelAgent requests are routed correctly
-		if (url.pathname.startsWith("/agents/TravelAgent/")) {
-			// Extract session name from path: /agents/TravelAgent/{sessionName}/...
-			const pathParts = url.pathname.split("/");
-			if (pathParts.length >= 4) {
-				const sessionName = pathParts[3];
-				const agentId = env.TravelAgent.idFromName(sessionName);
-				const stub = env.TravelAgent.get(agentId);
-				
-				// Add PartyServer-required headers
-				const headers = new Headers(request.headers);
-				headers.set("x-partykit-room", sessionName);
-				
-				// Only read and include body for methods that support it (POST, PUT, PATCH, etc.)
-				// GET/HEAD/DELETE/OPTIONS requests cannot have a body
-				const methodsWithBody = ["POST", "PUT", "PATCH"];
-				const hasBody = methodsWithBody.includes(request.method);
-				
-				// Create request options - only include body if method supports it
-				const requestOptions: RequestInit = {
-					method: request.method,
-					headers: headers,
-				};
-				
-				// Only read body for methods that support it
-				if (hasBody) {
-					const clonedRequest = request.clone();
-					requestOptions.body = await clonedRequest.arrayBuffer();
-				}
-				
-				const modifiedRequest = new Request(request.url, requestOptions);
-				
-				return stub.fetch(modifiedRequest);
+		// Try Agent framework's built-in routing first
+		try {
+			const agentResponse = await routeAgentRequest(request, env);
+			if (agentResponse) {
+				console.log("[Main] routeAgentRequest handled the request");
+				return agentResponse;
 			}
+		} catch (error) {
+			console.error("[Main] routeAgentRequest error:", error);
 		}
 
-		// Route other agent requests (if any)
-		// routeAgentRequest automatically discovers agents from env bindings
-		/**
-		 * const agentResponse = await routeAgentRequest(request, env);
-		 * if (agentResponse) {
-		 * 	return agentResponse;
-		 * }
-		 */
+		// Fallback to explicit TravelAgent routing
+		// This ensures TravelAgent requests are routed correctly
+		const agentResponse = await routeTravelAgentRequest(request, env);
+		if (agentResponse) {
+			return agentResponse;
+		}
 
 		// Handle static assets (frontend)
 		if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
 			return env.ASSETS.fetch(request);
 		}
 
-		// Gateway WebSocket endpoint for low-latency realtime communication
-		if (url.pathname === "/api/gateway/ws") {
-			return handleGatewayWebSocket(request, env);
-		}
-
-		// Realtime webhook endpoint (optional - can use WebSocket instead)
+		// Realtime webhook endpoint
 		if (url.pathname === "/api/realtime/webhook") {
 			if (request.method === "POST") {
-				return handleRealtimeWebhook(request, env);
+				return handleRealtimeWebhook(request, env, ctx);
 			}
 			return new Response("Method not allowed", { status: 405 });
 		}
@@ -119,6 +150,14 @@ export default {
 		if (url.pathname === "/api/seed-rag") {
 			if (request.method === "POST") {
 				return handleSeedRAG(request, env);
+			}
+			return new Response("Method not allowed", { status: 405 });
+		}
+
+		// Test endpoint for LLM, RAG, and tool calling
+		if (url.pathname === "/api/test/llm-rag-tools") {
+			if (request.method === "POST") {
+				return handleTestLLMRAGTools(request, env);
 			}
 			return new Response("Method not allowed", { status: 405 });
 		}
@@ -228,49 +267,96 @@ async function handleSeedRAG(request: Request, env: Env): Promise<Response> {
 }
 
 /**
- * Handles Gateway WebSocket connections for low-latency realtime communication
- * Routes WebSocket connections to the appropriate TravelAgent instance based on userId
+ * Test endpoint to verify LLM, RAG, and tool calling work
  */
-async function handleGatewayWebSocket(
+async function handleTestLLMRAGTools(
 	request: Request,
 	env: Env,
 ): Promise<Response> {
-	// Check if this is a WebSocket upgrade request
-	if (request.headers.get("Upgrade") !== "websocket") {
-		return new Response("Expected WebSocket upgrade", { status: 426 });
-	}
-
-	const url = new URL(request.url);
-	
-	// Extract userId from query parameter (e.g., /api/gateway/ws?userId=user123)
-	const userId = url.searchParams.get("userId");
-	
-	if (!userId) {
-		return new Response("Missing userId query parameter", { status: 400 });
-	}
-
 	try {
-		// Get or create TravelAgent instance for this user
-		// Each user gets their own agent instance with persistent state
-		const agentId = env.TravelAgent.idFromName(userId);
-		const stub = env.TravelAgent.get(agentId);
-
-		// Create a new request with PartyServer-required headers
-		const headers = new Headers(request.headers);
-		headers.set("x-partykit-room", userId);
-
-		// Forward the WebSocket upgrade request to the TravelAgent Durable Object
-		// The Durable Object will handle the WebSocket connection and messages
-		const modifiedRequest = new Request(request.url, {
-			method: request.method,
+		const body = (await request.json()) as { message?: string };
+		const message = body.message || "Hello, I want to plan a trip to Paris";
+		
+		console.log("[Test] Starting LLM/RAG/Tools test with message:", message);
+		
+		// Create RPC request to call testLLMRAGTools (lightweight test method)
+		const rpcRequest = {
+			type: "rpc",
+			id: `test-${Date.now()}`,
+			method: "testLLMRAGTools",
+			args: [message],
+		};
+		
+		const agentPath = `/agents/TravelAgent/test-session/rpc`;
+		const agentUrl = new URL(agentPath, request.url);
+		
+		const headers = new Headers();
+		headers.set("x-partykit-room", "test-session");
+		headers.set("Content-Type", "application/json");
+		
+		const agentRequest = new Request(agentUrl.toString(), {
+			method: "POST",
 			headers: headers,
+			body: JSON.stringify(rpcRequest),
 		});
-
-		return await stub.fetch(modifiedRequest);
-	} catch (error) {
-		console.error("Error handling gateway WebSocket:", error);
+		
+		console.log("[Test] Calling TravelAgent.testLLMRAGTools via routeTravelAgentRequest...");
+		console.log("[Test] Agent request URL:", agentRequest.url);
+		
+		// Use routeTravelAgentRequest instead of stub.fetch() directly
+		// This ensures proper routing and body handling
+		const response = await routeTravelAgentRequest(agentRequest, env);
+		
+		if (!response) {
+			return new Response(
+				JSON.stringify({ error: "Failed to route to TravelAgent" }),
+				{ status: 500, headers: { "content-type": "application/json" } },
+			);
+		}
+		
+		if (!response.ok) {
+			const errorText = await response.text();
+			return new Response(
+				JSON.stringify({ error: "RPC call failed", details: errorText }),
+				{ status: 500, headers: { "content-type": "application/json" } },
+			);
+		}
+		
+		const result = (await response.json()) as { 
+			result?: {
+				success: boolean;
+				ragTriggered: boolean;
+				toolsTriggered: boolean;
+				ragContextLength: number;
+				toolResultsLength: number;
+				llmStarted: boolean;
+				preview: string;
+			};
+			[key: string]: unknown;
+		};
+		console.log("[Test] RPC result received");
+		
+		// testLLMRAGTools returns metadata, not the full stream
+		const testResult = result.result;
+		
 		return new Response(
-			JSON.stringify({ error: "Failed to establish WebSocket connection" }),
+			JSON.stringify({
+				success: true,
+				message: "Test completed",
+				testResults: testResult,
+			}),
+			{
+				status: 200,
+				headers: { "content-type": "application/json" },
+			},
+		);
+	} catch (error) {
+		console.error("[Test] Error:", error);
+		return new Response(
+			JSON.stringify({
+				error: "Test failed",
+				message: error instanceof Error ? error.message : "Unknown error",
+			}),
 			{
 				status: 500,
 				headers: { "content-type": "application/json" },
@@ -286,6 +372,7 @@ async function handleGatewayWebSocket(
 async function handleRealtimeWebhook(
 	request: Request,
 	env: Env,
+	ctx: ExecutionContext,
 ): Promise<Response> {
 	try {
 		// Parse webhook event from Realtime
@@ -321,57 +408,77 @@ async function handleRealtimeWebhook(
 			});
 		}
 
-		// Get or create TravelAgent instance for this user
-		const agentId = env.TravelAgent.idFromName(userId);
-		const stub = env.TravelAgent.get(agentId);
-
-		// Call handleMessage on the agent
-		// We need to make an RPC call to the agent
+		// Call handleMessageStreaming on the agent via RPC
+		// Instead of using stub.fetch() directly (which hangs in waitUntil), route through the main handler
 		const rpcRequest = {
 			type: "rpc",
 			id: `realtime-${Date.now()}`,
-			method: "handleMessage",
-			args: [messageText],
+			method: "handleMessageStreaming",
+			args: [messageText, roomId, userId],
 		};
 
-		// Create a request to the agent
+		// Build the agent URL path
+		const agentPath = `/agents/TravelAgent/${userId}/rpc`;
+		const agentUrl = new URL(agentPath, request.url);
+		
+		// Add PartyServer-required headers
 		const headers = new Headers();
 		headers.set("x-partykit-room", userId);
 		headers.set("Content-Type", "application/json");
 
-		const agentRequest = new Request(
-			`${request.url.split("/api")[0]}/agents/TravelAgent/${userId}/rpc`,
-			{
-				method: "POST",
-				headers: headers,
-				body: JSON.stringify(rpcRequest),
-			},
-		);
+		// Create request body
+		const bodyText = JSON.stringify(rpcRequest);
+		
+		// Create request that will be routed through the main handler
+		const agentRequest = new Request(agentUrl.toString(), {
+			method: "POST",
+			headers: headers,
+			body: bodyText,
+		});
 
-		const agentResponse = await stub.fetch(agentRequest);
-		const agentResult = (await agentResponse.json()) as {
-			success?: boolean;
-			result?: string | { message?: string; [key: string]: unknown };
-			error?: string;
-		};
+		// Call handleMessageStreaming - it returns immediately, streaming happens in background
+		// Since handleMessageStreaming returns immediately (we fixed that), we can await it directly
+		// without using waitUntil(), which avoids the stub.fetch() hanging issue
+		console.log("[Webhook] Starting streaming RPC call");
+		console.log("[Webhook] RPC Request:", JSON.stringify(rpcRequest, null, 2));
+		console.log("[Webhook] Agent request URL:", agentRequest.url);
+		console.log("[Webhook] Calling routeTravelAgentRequest directly (not in waitUntil)...");
+		
+		// Start the RPC call in the background (fire-and-forget)
+		// This allows the webhook to return immediately, avoiding CPU time limits
+		// The work continues in the background within the Durable Object
+		routeTravelAgentRequest(agentRequest, env)
+			.then((response) => {
+				if (response) {
+					console.log("[Webhook] RPC call completed in background, status:", response.status);
+					if (!response.ok) {
+						response.text().then((errorText) => {
+							console.error("[Webhook] RPC call failed:", response.status, errorText);
+						});
+					} else {
+						response.json().then((result) => {
+							console.log("[Webhook] RPC result:", JSON.stringify(result, null, 2));
+						});
+					}
+				}
+			})
+			.catch((error) => {
+				console.error("[Webhook] Error in background RPC call:", error);
+				console.error("[Webhook] Error type:", error?.constructor?.name);
+				console.error("[Webhook] Error stack:", error instanceof Error ? error.stack : "No stack trace");
+				// Publish error message to Realtime
+				publishToRealtime(
+					env,
+					roomId,
+					`Error: ${error instanceof Error ? error.message : "Failed to process message"}`,
+					userId,
+				).catch((publishError) => {
+					console.error("[Webhook] Failed to publish error to Realtime:", publishError);
+				});
+			});
 
-		// Extract the response text from the agent result
-		let responseText = "";
-		if (agentResult.success && agentResult.result) {
-			responseText =
-				typeof agentResult.result === "string"
-					? agentResult.result
-					: (agentResult.result.message as string | undefined) ||
-						JSON.stringify(agentResult.result);
-		} else {
-			responseText =
-				agentResult.error || "Failed to process message";
-		}
-
-		// Publish the agent's response back to Realtime
-		await publishToRealtime(env, roomId, responseText, userId);
-
-		return new Response(JSON.stringify({ success: true }), {
+		// Return immediately - work continues in background
+		return new Response(JSON.stringify({ success: true, message: "Processing started" }), {
 			status: 200,
 			headers: { "content-type": "application/json" },
 		});
@@ -441,10 +548,13 @@ async function publishToRealtime(
 	text: string,
 	userId?: string,
 ): Promise<void> {
-	// Check if Realtime is configured
-	if (!env.REALTIME_API_TOKEN || !env.REALTIME_NAMESPACE_ID) {
+	// Check if Realtime is configured (with fallbacks)
+	const namespaceId = env.REALTIME_NAMESPACE_ID || env.REALTIME_APP_ID;
+	const apiToken = env.REALTIME_API_TOKEN || env.CLOUDFLARE_API_TOKEN;
+	
+	if (!apiToken || !namespaceId) {
 		console.warn(
-			"Realtime not configured: REALTIME_API_TOKEN or REALTIME_NAMESPACE_ID missing",
+			"Realtime not configured: Missing REALTIME_API_TOKEN (or CLOUDFLARE_API_TOKEN) and REALTIME_NAMESPACE_ID (or REALTIME_APP_ID)",
 		);
 		return;
 	}
@@ -515,14 +625,21 @@ async function publishToRealtimeHTTP(
 		timestamp: Date.now(),
 	};
 
-	const accountId = env.REALTIME_ACCOUNT_ID || env.REALTIME_NAMESPACE_ID;
-	const namespaceId = env.REALTIME_NAMESPACE_ID;
+	const accountId = env.REALTIME_ACCOUNT_ID || env.REALTIME_NAMESPACE_ID || env.REALTIME_APP_ID;
+	const namespaceId = env.REALTIME_NAMESPACE_ID || env.REALTIME_APP_ID;
+	const apiToken = env.REALTIME_API_TOKEN || env.CLOUDFLARE_API_TOKEN;
+	
+	if (!apiToken || !namespaceId) {
+		console.error("Cannot publish to Realtime: Missing credentials");
+		return;
+	}
+	
 	const realtimeUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/realtime/namespaces/${namespaceId}/rooms/${roomId}/messages`;
 
 	const publishResponse = await fetch(realtimeUrl, {
 		method: "POST",
 		headers: {
-			"Authorization": `Bearer ${env.REALTIME_API_TOKEN}`,
+			"Authorization": `Bearer ${apiToken}`,
 			"Content-Type": "application/json",
 		},
 		body: JSON.stringify(response),
