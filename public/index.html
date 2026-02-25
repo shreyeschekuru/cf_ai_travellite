@@ -257,6 +257,68 @@
 			}
 			#send-button:disabled { opacity: 0.6; cursor: not-allowed; }
 
+			/* Trips sidebar (ChatGPT-style threads) */
+			.app-layout {
+				display: flex;
+				flex: 1;
+				min-height: 0;
+				max-width: 1200px;
+				margin: 0 auto;
+				width: 100%;
+			}
+			.trips-sidebar {
+				width: 240px;
+				flex-shrink: 0;
+				background: var(--cream-card);
+				border-radius: 12px;
+				margin: 0 16px 24px 24px;
+				padding: 12px;
+				box-shadow: var(--shadow);
+				display: flex;
+				flex-direction: column;
+				min-height: 200px;
+			}
+			.trips-sidebar h2 {
+				font-size: 0.9rem;
+				color: var(--teal);
+				margin: 0 0 12px;
+				padding-bottom: 8px;
+				border-bottom: 1px solid var(--teal-border);
+			}
+			.trips-list {
+				flex: 1;
+				overflow-y: auto;
+				display: flex;
+				flex-direction: column;
+				gap: 4px;
+			}
+			.trip-item {
+				display: block;
+				width: 100%;
+				padding: 10px 12px;
+				border: none;
+				border-radius: 8px;
+				background: transparent;
+				color: var(--primary);
+				font-size: 0.85rem;
+				text-align: left;
+				cursor: pointer;
+				transition: background 0.2s;
+			}
+			.trip-item:hover {
+				background: var(--teal-muted);
+			}
+			.trip-item.active {
+				background: var(--teal-muted);
+				border-left: 3px solid var(--teal);
+				font-weight: 600;
+			}
+			.trip-item .trip-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+			.trip-item .trip-date { font-size: 0.75rem; color: var(--teal); margin-top: 2px; }
+
+			@media (max-width: 768px) {
+				.trips-sidebar { display: none; }
+			}
 			@media (max-width: 640px) {
 				.page-header { padding: 16px 16px 12px; }
 				.chat-wrapper { padding: 0 16px 16px; }
@@ -275,7 +337,12 @@
 			<p id="realtime-status">Connecting…</p>
 		</div>
 
-		<div class="chat-wrapper">
+		<div class="app-layout">
+			<aside class="trips-sidebar" id="trips-sidebar">
+				<h2>Trips</h2>
+				<div class="trips-list" id="trips-list"></div>
+			</aside>
+			<div class="chat-wrapper">
 			<div class="chat-card">
 				<div id="chat-messages" class="chat-messages">
 					<div class="message assistant-message">
@@ -304,6 +371,7 @@
 					</div>
 				</div>
 			</div>
+			</div>
 		</div>
 
 		<script>
@@ -318,6 +386,77 @@
 			let userId = sessionStorage.getItem('travel-agent-user') || ('user-' + Math.random().toString(36).slice(2, 9));
 			sessionStorage.setItem('travel-agent-room', roomId);
 			sessionStorage.setItem('travel-agent-user', userId);
+
+			let appState = { currentTripId: null, trips: [], recentMessages: [], currentTripTitle: '' };
+
+			async function fetchState() {
+				try {
+					const res = await fetch('/api/agents/TravelAgent/state?sessionId=' + encodeURIComponent(userId));
+					if (!res.ok) return;
+					const state = await res.json();
+					appState = {
+						currentTripId: state.currentTripId || null,
+						trips: state.trips || [],
+						recentMessages: state.recentMessages || [],
+						currentTripTitle: state.currentTripTitle || 'New trip'
+					};
+					renderTrips();
+					renderMessages();
+				} catch (e) { console.warn('fetchState', e); }
+			}
+
+			function renderTrips() {
+				const list = document.getElementById('trips-list');
+				if (!list) return;
+				const currentId = appState.currentTripId;
+				const items = [];
+				if (currentId && appState.currentTripTitle) {
+					items.push({ id: currentId, title: appState.currentTripTitle, createdAt: '', isCurrent: true });
+				}
+				(appState.trips || []).slice().reverse().forEach(function (t) {
+					items.push({ id: t.id, title: t.title, createdAt: t.createdAt, isCurrent: false });
+				});
+				list.innerHTML = items.map(function (t) {
+					const d = t.createdAt ? new Date(t.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+					return '<button type="button" class="trip-item' + (t.isCurrent ? ' active' : '') + '" data-trip-id="' + (t.id || '') + '">' +
+						'<span class="trip-title">' + (t.title || 'New trip') + '</span>' +
+						(d ? '<span class="trip-date">' + d + '</span>' : '') + '</button>';
+				}).join('');
+				list.querySelectorAll('.trip-item').forEach(function (el) {
+					const id = el.getAttribute('data-trip-id');
+					if (id && !el.classList.contains('active')) el.addEventListener('click', function () { loadTrip(id); });
+				});
+			}
+
+			function renderMessages() {
+				const container = document.getElementById('chat-messages');
+				if (!container) return;
+				const msgs = appState.recentMessages || [];
+				let html = '';
+				if (msgs.length === 0) {
+					html = '<div class="message assistant-message"><div class="avatar" aria-hidden="true"></div><p>Hi, I\'m your travel agent. Plan trips, find flights and hotels, or ask for activities. Type below or pick a quick action.</p></div>';
+				} else {
+					msgs.forEach(function (m) {
+						const content = (m.content || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+						if (m.role === 'assistant') html += '<div class="message assistant-message"><div class="avatar" aria-hidden="true"></div><p>' + content + '</p></div>';
+						else html += '<div class="message user-message"><p>' + content + '</p><span class="sent-check" aria-hidden="true">✓</span></div>';
+					});
+				}
+				container.innerHTML = html;
+			}
+
+			async function loadTrip(tripId) {
+				try {
+					const res = await fetch('/api/agents/TravelAgent/loadTrip', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ sessionId: userId, tripId: tripId })
+					});
+					if (!res.ok) return;
+					const data = await res.json();
+					if (data.success) await fetchState();
+				} catch (e) { console.warn('loadTrip', e); }
+			}
 
 			userInput.addEventListener('keydown', (e) => {
 				if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
@@ -399,6 +538,7 @@
 			}
 
 			initRealtime();
+			fetchState();
 
 			async function send() {
 				const message = userInput.value.trim();
@@ -476,6 +616,7 @@
 					sendButton.disabled = false;
 					isProcessing = false;
 					userInput.focus();
+					fetchState();
 				}
 			}
 		</script>

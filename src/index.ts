@@ -10,7 +10,7 @@
 import { Env, ChatMessage, RealtimeWebhookEvent, RealtimeAgentResponse } from "./types";
 import { TravelAgent } from "./travel-agent";
 import { RealtimeConnector } from "./realtime-connector";
-import { runPipeline, parseSSEChunk, detectIntent } from "./pipeline";
+import { runPipeline, parseSSEChunk } from "./pipeline";
 
 // Export Durable Objects for discovery
 export { TravelAgent };
@@ -105,6 +105,16 @@ export default {
 		// Stream endpoint: run travel-agent pipeline (RAG + tools + LLM) and return SSE stream
 		if (url.pathname === "/api/agents/TravelAgent/stream" && request.method === "POST") {
 			return handleTravelAgentStream(request, env);
+		}
+
+		// Get session state (trips list + current thread) for sidebar and initial load
+		if (url.pathname === "/api/agents/TravelAgent/state" && request.method === "GET") {
+			return handleTravelAgentState(request, env);
+		}
+
+		// Load a trip thread (switch sidebar selection)
+		if (url.pathname === "/api/agents/TravelAgent/loadTrip" && request.method === "POST") {
+			return handleTravelAgentLoadTrip(request, env);
 		}
 
 		// Send message into the single-door flow (same as webhook: triggers TravelAgent DO → Realtime)
@@ -222,13 +232,13 @@ async function handleTravelAgentStream(request: Request, env: Env): Promise<Resp
 			});
 		}
 
-		// Load session state from TravelAgent DO
-		let tripState: { basics?: Record<string, unknown>; preferences?: string[]; recentMessages?: Array<{ role: "user" | "assistant"; content: string }>; currentIntent?: string | null } = {};
+		// Prepare turn: load state and detect new trip (save current thread and start new one if user started a new trip)
+		let tripState: { basics?: Record<string, unknown>; preferences?: string[]; recentMessages?: Array<{ role: "user" | "assistant"; content: string }>; currentIntent?: string | null; currentTripId?: string | null; trips?: Array<{ id: string; title: string; createdAt: string }> } = {};
 		try {
 			const rpcRequest = new Request(new URL(`/agents/TravelAgent/${sessionId}/rpc`, request.url).toString(), {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ type: "rpc", id: "get-state-" + Date.now(), method: "getState", args: [] }),
+				body: JSON.stringify({ type: "rpc", id: "prepare-turn-" + Date.now(), method: "prepareTurn", args: [message] }),
 			});
 			const stateRes = await routeTravelAgentRequest(rpcRequest, env);
 			if (stateRes?.ok) {
@@ -236,13 +246,10 @@ async function handleTravelAgentStream(request: Request, env: Env): Promise<Resp
 				if (data.result) tripState = data.result;
 			}
 		} catch (e) {
-			console.warn("[TravelAgent stream] getState failed, using empty state:", e);
+			console.warn("[TravelAgent stream] prepareTurn failed, using empty state:", e);
 		}
 
-		// State Object: detect intent so subsequent messages are treated as part of this flow until changed or global intent
-		const newIntent = await detectIntent(env, message, tripState.currentIntent ?? null);
-		tripState.currentIntent = newIntent;
-
+		// Intent and new-trip were already set by prepareTurn in the DO; use returned state as-is
 		const stream = await runPipeline(env, message, tripState);
 		const [clientStream, accStream] = stream.tee();
 
@@ -280,6 +287,54 @@ async function handleTravelAgentStream(request: Request, env: Env): Promise<Resp
 			JSON.stringify({ error: "Failed to run pipeline", message: error instanceof Error ? error.message : "Unknown error" }),
 			{ status: 500, headers: { "content-type": "application/json" } },
 		);
+	}
+}
+
+/**
+ * GET /api/agents/TravelAgent/state?sessionId=xxx — return getState() for sidebar and current thread.
+ */
+async function handleTravelAgentState(request: Request, env: Env): Promise<Response> {
+	const url = new URL(request.url);
+	const sessionId = url.searchParams.get("sessionId")?.trim() || "default";
+	try {
+		const rpcRequest = new Request(new URL(`/agents/TravelAgent/${sessionId}/rpc`, request.url).toString(), {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ type: "rpc", id: "get-state-" + Date.now(), method: "getState", args: [] }),
+		});
+		const res = await routeTravelAgentRequest(rpcRequest, env);
+		if (!res?.ok) return new Response(JSON.stringify({ error: "Failed to get state" }), { status: 502, headers: { "content-type": "application/json" } });
+		const data = (await res.json()) as { result?: unknown };
+		return new Response(JSON.stringify(data.result ?? {}), { headers: { "content-type": "application/json" } });
+	} catch (e) {
+		console.warn("[TravelAgent state]", e);
+		return new Response(JSON.stringify({ error: "Failed to get state" }), { status: 500, headers: { "content-type": "application/json" } });
+	}
+}
+
+/**
+ * POST /api/agents/TravelAgent/loadTrip — body: { sessionId: string, tripId: string }. Load trip thread into session.
+ */
+async function handleTravelAgentLoadTrip(request: Request, env: Env): Promise<Response> {
+	try {
+		const body = (await request.json()) as { sessionId?: string; tripId?: string };
+		const sessionId = typeof body?.sessionId === "string" && body.sessionId.trim() ? body.sessionId.trim() : "default";
+		const tripId = typeof body?.tripId === "string" && body.tripId.trim() ? body.tripId.trim() : "";
+		if (!tripId) {
+			return new Response(JSON.stringify({ error: "tripId is required" }), { status: 400, headers: { "content-type": "application/json" } });
+		}
+		const rpcRequest = new Request(new URL(`/agents/TravelAgent/${sessionId}/rpc`, request.url).toString(), {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ type: "rpc", id: "load-trip-" + Date.now(), method: "loadTrip", args: [tripId] }),
+		});
+		const res = await routeTravelAgentRequest(rpcRequest, env);
+		if (!res?.ok) return new Response(JSON.stringify({ error: "Failed to load trip" }), { status: 502, headers: { "content-type": "application/json" } });
+		const data = (await res.json()) as { result?: { success?: boolean } };
+		return new Response(JSON.stringify(data.result ?? { success: false }), { headers: { "content-type": "application/json" } });
+	} catch (e) {
+		console.warn("[TravelAgent loadTrip]", e);
+		return new Response(JSON.stringify({ error: "Failed to load trip" }), { status: 500, headers: { "content-type": "application/json" } });
 	}
 }
 

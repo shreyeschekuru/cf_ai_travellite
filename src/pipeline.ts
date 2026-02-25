@@ -155,64 +155,100 @@ const defaultTripState: PipelineTripState = {
 	preferences: [],
 };
 
+/** Result of a single intent + new-trip classification call (one LLM call). */
+export interface ConversationClassification {
+	/** New currentIntent for State Object; null if global intent. */
+	intent: string | null;
+	/** True when we should save current thread and start a new one (different trip, or Start_Over/New_Search). */
+	isNewTrip: boolean;
+}
+
+/** Extract first JSON object from LLM response text. */
+function parseLLMJson<T>(response: unknown): T | null {
+	let text = "";
+	if (typeof response === "string") text = response;
+	else if (response && typeof response === "object" && "response" in response) text = String((response as { response: unknown }).response);
+	else text = JSON.stringify(response);
+	const jsonMatch = text.match(/\{[\s\S]*\}/);
+	if (!jsonMatch) return null;
+	try {
+		return JSON.parse(jsonMatch[0]) as T;
+	} catch {
+		return null;
+	}
+}
+
 /**
- * Detect conversation intent from the user message. Returns the new currentIntent for the State Object.
- * - Global intents (Cancel, Start_Over, New_Search, Help) → return null (clear state).
- * - New flow intent expressed by user → return that intent.
- * - Otherwise (user continuing current flow, e.g. answering a question) → return currentIntent unchanged.
+ * Single classifier: intent + whether to start a new trip thread.
+ * Use this instead of calling detectIntent and detectNewTrip separately.
+ * - intent: new currentIntent (null for global intents).
+ * - isNewTrip: true when user starts a different trip or says start over/new search (and we have something to save).
+ */
+export async function classifyConversation(
+	env: Env,
+	message: string,
+	currentIntent: string | null,
+	currentBasics: { destination?: string; origin?: string },
+	hasExistingMessages: boolean,
+): Promise<ConversationClassification> {
+	const flowList = FLOW_INTENTS.join(", ");
+	const globalList = GLOBAL_INTENTS.join(", ");
+	const dest = currentBasics.destination ?? "";
+	const origin = currentBasics.origin ?? "";
+	const prompt = `You are a conversation classifier for a travel assistant.
+
+User message: "${message}"
+Current conversation intent: ${currentIntent ?? "null"}
+Current trip context: destination=${dest || "none"}, origin=${origin || "none"}.
+
+Respond with ONLY a JSON object:
+{ "intent": "<IntentName>" | null, "isGlobal": boolean, "isNewTrip": boolean }
+
+- Flow intents (user starting or continuing a task): ${flowList}
+- Global intents (cancel, start over, new search, help): ${globalList}
+
+Rules:
+- intent: the flow intent name if starting/continuing a flow; the global name if cancel/start over/help; null if continuing current flow.
+- isGlobal: true only for global intents (Cancel, Start_Over, New_Search, Help, General).
+- isNewTrip: true if the user is starting a NEW or DIFFERENT trip (e.g. new destination, "plan another trip", "now plan a trip to Paris") OR says start over / new search. false if continuing the current trip (e.g. "from Dallas", "yes", adding details). Only set true when they clearly start a different trip or reset.
+- If ambiguous, prefer continuing (intent null, isGlobal false, isNewTrip false).`;
+
+	try {
+		const response = await env.AI.run(LLM_MODEL, {
+			messages: [
+				{ role: "system", content: "You are a classifier. Respond with only valid JSON: { intent: string | null, isGlobal: boolean, isNewTrip: boolean }." },
+				{ role: "user", content: prompt },
+			],
+			max_tokens: 100,
+		});
+		const parsed = parseLLMJson<{ intent?: string | null; isGlobal?: boolean; isNewTrip?: boolean }>(response);
+		if (!parsed) {
+			return { intent: currentIntent, isNewTrip: false };
+		}
+		const isGlobal = parsed.isGlobal === true || GLOBAL_INTENTS.includes((parsed.intent ?? "") as GlobalIntent);
+		const intent: string | null = isGlobal ? null : (typeof parsed.intent === "string" && parsed.intent.trim() ? parsed.intent.trim() : currentIntent);
+		const isNewTrip = hasExistingMessages && (parsed.isNewTrip === true || isGlobal && (parsed.intent === "Start_Over" || parsed.intent === "New_Search"));
+		if (isGlobal) console.log("[Pipeline State] Global intent:", parsed.intent, "— clearing currentIntent");
+		else if (intent !== currentIntent) console.log("[Pipeline State] New flow intent:", intent, "(previous:", currentIntent ?? "null", ")");
+		if (isNewTrip) console.log("[Pipeline State] New trip detected — will save current thread");
+		return { intent, isNewTrip };
+	} catch (e) {
+		console.error("[Pipeline] classifyConversation error:", e);
+		return { intent: currentIntent, isNewTrip: false };
+	}
+}
+
+/**
+ * Detect conversation intent only (for callers that don't need trip-thread logic).
+ * Prefer classifyConversation when you need both intent and isNewTrip to avoid a second LLM call.
  */
 export async function detectIntent(
 	env: Env,
 	message: string,
 	currentIntent: string | null,
 ): Promise<string | null> {
-	try {
-		const flowList = FLOW_INTENTS.join(", ");
-		const globalList = GLOBAL_INTENTS.join(", ");
-		const prompt = `You are a conversation intent classifier for a travel assistant.
-
-User message: "${message}"
-Current conversation intent (State): ${currentIntent ?? "null"}
-
-Classify the user's intent. Respond with ONLY a JSON object:
-{ "intent": "<IntentName>" | null, "isGlobal": boolean }
-
-- Flow intents (user starting or continuing a specific task): ${flowList}
-- Global intents (user wants to cancel, start over, get help, or general chat): ${globalList}
-
-Rules:
-- If the user explicitly expresses a NEW flow (e.g. "I want to open an account", "find flights", "plan a trip to Austin"), set intent to that flow name and isGlobal false.
-- If the user says cancel, stop, never mind, start over, new search, or help, set intent to that global name and isGlobal true.
-- If the user is clearly continuing the current flow (answering a question, adding details, saying "yes" or "from Dallas"), set intent to null and isGlobal false (state stays unchanged).
-- If current intent is set and the message is ambiguous, prefer continuing the current flow (intent null, isGlobal false).`;
-
-		const response = await env.AI.run(LLM_MODEL, {
-			messages: [
-				{ role: "system", content: "You are an intent classifier. Respond with only valid JSON: { intent: string | null, isGlobal: boolean }." },
-				{ role: "user", content: prompt },
-			],
-			max_tokens: 80,
-		});
-		let text = "";
-		if (typeof response === "string") text = response;
-		else if (response && typeof response === "object" && "response" in response) text = String((response as { response: unknown }).response);
-		else text = JSON.stringify(response);
-		const jsonMatch = text.match(/\{[\s\S]*\}/);
-		if (!jsonMatch) return currentIntent;
-		const parsed = JSON.parse(jsonMatch[0]) as { intent?: string | null; isGlobal?: boolean };
-		if (parsed.isGlobal === true || GLOBAL_INTENTS.includes((parsed.intent ?? "") as GlobalIntent)) {
-			console.log("[Pipeline State] Global intent detected:", parsed.intent, "— clearing currentIntent");
-			return null;
-		}
-		if (parsed.intent && typeof parsed.intent === "string" && parsed.intent.trim() !== "") {
-			console.log("[Pipeline State] New flow intent:", parsed.intent, "(previous:", currentIntent ?? "null", ")");
-			return parsed.intent.trim();
-		}
-		return currentIntent;
-	} catch (e) {
-		console.error("[Pipeline] detectIntent error:", e);
-		return currentIntent;
-	}
+	const result = await classifyConversation(env, message, currentIntent, {}, false);
+	return result.intent;
 }
 
 function shouldUseRAG(message: string): boolean {
@@ -324,15 +360,9 @@ Respond with ONLY a JSON object: { "apiName": "api_name", "params": { ... } } or
 			],
 			max_tokens: 200,
 		});
-		let responseText = "";
-		if (typeof response === "string") responseText = response;
-		else if (response && typeof response === "object" && "response" in response) responseText = String((response as { response: unknown }).response);
-		else responseText = JSON.stringify(response);
-		const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-		if (!jsonMatch) return null;
-		const parsed = JSON.parse(jsonMatch[0]) as { apiName?: string | null; params?: Record<string, unknown> };
-		if (parsed.apiName && parsed.apiName !== "null") return { apiName: parsed.apiName, params: parsed.params || {} };
-		return null;
+		const parsed = parseLLMJson<{ apiName?: string | null; params?: Record<string, unknown> }>(response);
+		if (!parsed || !parsed.apiName || parsed.apiName === "null") return null;
+		return { apiName: parsed.apiName, params: parsed.params ?? {} };
 	} catch (e) {
 		console.error("Pipeline determineAmadeusAPICall error:", e);
 		return null;
