@@ -23,14 +23,25 @@ const defaultTripState: PipelineTripState = {
 };
 
 function shouldUseRAG(message: string): boolean {
+	const lower = message.toLowerCase();
 	const ragKeywords = [
-		"recommend", "suggest", "what to do", "attractions", "places to visit",
-		"activities", "things to see",
+		"recommend",
+		"suggest",
+		"what to do",
+		"attractions",
+		"places to visit",
+		"activities",
+		"things to see",
+		"itinerary",
+		"plan a trip",
+		"plan my trip",
+		"trip to ",
 	];
-	return ragKeywords.some((k) => message.toLowerCase().includes(k));
+	return ragKeywords.some((k) => lower.includes(k));
 }
 
 function shouldUseTools(message: string): boolean {
+	const lower = message.toLowerCase();
 	const toolKeywords = [
 		"flight", "flights", "airline", "airport", "departure", "arrival",
 		"hotel", "hotels", "accommodation", "stay", "lodging",
@@ -38,8 +49,9 @@ function shouldUseTools(message: string): boolean {
 		"book", "booking", "search", "price", "cost", "availability", "options",
 		"destination", "route", "transfer", "car rental", "rental car",
 		"recommend", "suggest", "find", "show me", "what are",
+		"plan a trip", "trip to ", "weekend trip", "3-day trip", "budget",
 	];
-	return toolKeywords.some((k) => message.toLowerCase().includes(k));
+	return toolKeywords.some((k) => lower.includes(k));
 }
 
 async function generateEmbedding(env: Env, text: string): Promise<number[]> {
@@ -366,6 +378,7 @@ async function useTools(env: Env, message: string, tripState: PipelineTripState)
 			return "";
 		}
 		console.log("[Pipeline Tools] Calling Amadeus API:", apiCall.apiName);
+		console.log("[Pipeline Tools] Amadeus API raw input:", JSON.stringify({ apiName: apiCall.apiName, params: apiCall.params }, null, 2));
 		const result = await callAmadeusAPI(client, apiCall.apiName, apiCall.params as Record<string, unknown>);
 		const toolResults: string[] = [];
 		if (result.success && result.data) {
@@ -389,8 +402,10 @@ async function useTools(env: Env, message: string, tripState: PipelineTripState)
 		} else {
 			toolResults.push(`API call error (${apiCall.apiName}): ${result.error ?? "Failed"}`);
 		}
-		console.log("[Pipeline Tools] Amadeus result:", result.success ? "success" : "error", "| summary length:", toolResults.join("; ").length);
-		return toolResults.length > 0 ? `[Tool Results: ${toolResults.join("; ")}]` : "";
+		const summary = toolResults.join("; ");
+		console.log("[Pipeline Tools] Amadeus result:", result.success ? "success" : "error", "| summary length:", summary.length);
+		console.log("[Pipeline Tools] Amadeus summary:", summary);
+		return toolResults.length > 0 ? `[Tool Results: ${summary}]` : "";
 	} catch (e) {
 		console.error("[Pipeline Tools] useTools error:", e);
 		return `[Tool Error: ${e instanceof Error ? e.message : "Unknown error"}]`;

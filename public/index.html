@@ -3,117 +3,359 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>Travel Agent</title>
+		<title>Travel Agent · travellite</title>
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link
+			href="https://fonts.googleapis.com/css2?family=Quicksand:wght@600;700&display=swap"
+			rel="stylesheet"
+		/>
 		<style>
 			:root {
-				--primary: #0ea5e9;
-				--primary-hover: #0284c7;
-				--bg: #f8fafc;
-				--surface: #fff;
-				--border: #e2e8f0;
-				--text: #0f172a;
-				--text-muted: #64748b;
-				--user-bg: #e0f2fe;
-				--assistant-bg: #f1f5f9;
+				--cream: #FFFFC7;
+				--cream-card: #FFFFE0;
+				--primary: #B0413E;
+				--teal: #548687;
+				--teal-muted: rgba(84, 134, 135, 0.4);
+				--teal-border: rgba(84, 134, 135, 0.25);
+				--accent: #FA790F;
+				--accent-hover: #B0413E;
+				--agent-bg: #f5f9e8;
+				--agent-accent: #FA790F;
+				--user-bg: #548687;
+				--shadow: 0 2px 12px rgba(84, 134, 135, 0.12);
 			}
 			* { box-sizing: border-box; margin: 0; padding: 0; }
 			body {
-				font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+				font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 				line-height: 1.6;
-				color: var(--text);
-				background: var(--bg);
+				color: var(--primary);
+				background: var(--cream);
 				min-height: 100vh;
 				display: flex;
 				flex-direction: column;
 			}
-			header {
-				padding: 1rem 1.5rem;
-				background: var(--surface);
-				border-bottom: 1px solid var(--border);
+
+			/* Top bar */
+			.topbar {
+				display: flex;
+				align-items: center;
+				justify-content: flex-start;
+				padding: 12px 24px;
+				background: var(--cream);
+				border-bottom: 1px solid var(--teal-border);
+				box-shadow: 0 1px 0 var(--teal-muted);
 				flex-shrink: 0;
 			}
-			header h1 { font-size: 1.25rem; color: var(--primary); }
-			header p { font-size: 0.875rem; color: var(--text-muted); margin-top: 0.25rem; }
-			.note { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem; padding: 0.5rem; background: var(--assistant-bg); border-radius: 6px; }
-			.chat-container {
+			.logo-row {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+			}
+			.logo-icon {
+				width: 32px;
+				height: 32px;
+				background: linear-gradient(135deg, var(--accent) 0%, var(--primary) 100%);
+				border-radius: 8px;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				font-size: 18px;
+				color: #fff;
+			}
+			.logo-wordmark {
+				font-weight: 700;
+				font-size: 1.25rem;
+				color: var(--primary);
+				letter-spacing: -0.02em;
+			}
+			.topbar-actions {
+				display: flex;
+				gap: 8px;
+			}
+			.topbar-actions button {
+				padding: 6px 14px;
+				border: 1px solid var(--teal);
+				background: transparent;
+				color: var(--teal);
+				border-radius: 999px;
+				font-size: 0.875rem;
+				cursor: pointer;
+			}
+			.topbar-actions button:hover {
+				background: var(--accent);
+				border-color: var(--accent);
+				color: #fff;
+			}
+
+			/* Header / breadcrumb */
+			.page-header {
+				padding: 24px 24px 16px;
+				max-width: 1100px;
+				margin: 0 auto;
+				width: 100%;
+			}
+			.page-header h1 {
+				font-size: 1.5rem;
+				color: var(--primary);
+				font-weight: 700;
+				font-family: "Quicksand", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+				letter-spacing: -0.02em;
+			}
+			.brand-travel {
+				color: var(--primary);
+			}
+			.brand-lite {
+				color: var(--teal);
+			}
+			.page-header .subtitle {
+				font-size: 0.875rem;
+				color: var(--teal);
+				margin-top: 4px;
+			}
+			#realtime-status {
+				font-size: 0.8rem;
+				color: var(--teal);
+				margin-top: 8px;
+				padding: 8px 12px;
+				background: var(--cream-card);
+				border-radius: 8px;
+				border: 1px solid var(--teal-border);
+			}
+
+			/* Main chat area */
+			.chat-wrapper {
 				flex: 1;
 				display: flex;
 				flex-direction: column;
-				max-width: 720px;
+				max-width: 1000px;
 				width: 100%;
 				margin: 0 auto;
-				padding: 1rem;
+				padding: 0 24px 24px;
+			}
+			.chat-card {
+				flex: 1;
+				display: flex;
+				flex-direction: column;
+				background: var(--cream-card);
+				border-radius: 16px;
+				box-shadow: var(--shadow);
+				padding: 16px;
+				min-height: 320px;
 			}
 			.chat-messages {
 				flex: 1;
 				overflow-y: auto;
 				display: flex;
 				flex-direction: column;
-				gap: 0.75rem;
-				padding: 0.5rem 0;
+				gap: 28px;
+				padding: 24px 0 16px;
 			}
 			.message {
-				padding: 0.75rem 1rem;
-				border-radius: 12px;
+				display: flex;
+				align-items: flex-start;
+				gap: 12px;
 				max-width: 85%;
+				padding: 12px 16px;
+				border-radius: 12px;
 			}
-			.message p { white-space: pre-wrap; overflow-wrap: break-word; margin: 0; }
-			.user-message { background: var(--user-bg); align-self: flex-end; }
-			.assistant-message { background: var(--assistant-bg); align-self: flex-start; }
+			.message p {
+				white-space: pre-wrap;
+				overflow-wrap: break-word;
+				margin: 0;
+				font-size: 0.95rem;
+			}
+			.assistant-message {
+				align-self: flex-start;
+				background: var(--agent-bg);
+				border-left: 4px solid var(--agent-accent);
+				box-shadow: 0 1px 4px rgba(84, 134, 135, 0.08);
+			}
+			.assistant-message .avatar {
+				width: 32px;
+				height: 32px;
+				border-radius: 50%;
+				background: #fff url("/travellite-hawk.png") center/cover no-repeat;
+				box-shadow: 0 0 0 2px rgba(250, 121, 15, 0.35);
+				flex-shrink: 0;
+			}
+			.user-message {
+				align-self: flex-end;
+				background: var(--user-bg);
+				color: #fff;
+			}
+			.user-message p { color: #fff; }
+			.user-message .sent-check {
+				flex-shrink: 0;
+				color: var(--accent);
+				font-size: 0.875rem;
+			}
+
+			/* Streaming indicator */
+			#typing-indicator {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				padding: 12px 16px;
+				font-size: 0.9rem;
+				color: var(--teal);
+				opacity: 0;
+				transition: opacity 0.2s;
+			}
+			#typing-indicator.visible { opacity: 1; }
+			.typing-dots {
+				display: flex;
+				gap: 4px;
+			}
+			.typing-dots span {
+				width: 6px;
+				height: 6px;
+				border-radius: 50%;
+				background: var(--accent);
+				animation: typing-bounce 0.6s ease-in-out infinite;
+			}
+			.typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+			.typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+			@keyframes typing-bounce {
+				0%, 60%, 100% { transform: translateY(0); }
+				30% { transform: translateY(-4px); }
+			}
+
+			/* Quick-action chips */
+			.chips-row {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 8px;
+				padding: 0 0 12px;
+			}
+			.chip {
+				padding: 8px 16px;
+				border-radius: 999px;
+				border: 1px solid var(--teal);
+				background: transparent;
+				color: var(--primary);
+				font-size: 0.875rem;
+				cursor: pointer;
+				transition: all 0.2s;
+			}
+			.chip:hover {
+				border-color: var(--accent);
+				color: var(--accent);
+			}
+			.chip.selected {
+				background: var(--accent);
+				border-color: var(--accent);
+				color: #fff;
+			}
+
+			/* Input bar */
 			.input-row {
 				display: flex;
-				gap: 0.5rem;
-				padding: 0.75rem 0;
-				border-top: 1px solid var(--border);
+				align-items: center;
+				gap: 12px;
+				padding: 16px 0 0;
+				border-top: 1px solid var(--teal-border);
 				flex-shrink: 0;
+			}
+			.input-wrap {
+				flex: 1;
+				display: flex;
+				align-items: center;
+				background: #fff;
+				border: 1px solid var(--teal-border);
+				border-radius: 999px;
+				padding: 4px 4px 4px 20px;
+				box-shadow: 0 1px 4px rgba(84, 134, 135, 0.06);
 			}
 			#user-input {
 				flex: 1;
-				padding: 0.75rem 1rem;
-				border: 1px solid var(--border);
-				border-radius: 8px;
+				border: none;
+				background: transparent;
+				padding: 10px 0;
 				font: inherit;
+				color: var(--primary);
 				resize: none;
-				min-height: 44px;
+				min-height: 40px;
 			}
+			#user-input::placeholder { color: var(--teal-muted); }
 			#send-button {
-				padding: 0 1.25rem;
-				background: var(--primary);
+				padding: 10px 20px;
+				background: var(--accent);
 				color: #fff;
 				border: none;
-				border-radius: 8px;
-				font-weight: 500;
+				border-radius: 999px;
+				font-weight: 600;
+				font-size: 0.9rem;
 				cursor: pointer;
+				transition: background 0.2s;
 			}
-			#send-button:hover { background: var(--primary-hover); }
+			#send-button:hover:not(:disabled) {
+				background: var(--accent-hover);
+			}
 			#send-button:disabled { opacity: 0.6; cursor: not-allowed; }
-			.typing { font-style: italic; color: var(--text-muted); padding: 0.5rem 0; }
+
+			@media (max-width: 640px) {
+				.page-header { padding: 16px 16px 12px; }
+				.chat-wrapper { padding: 0 16px 16px; }
+				.topbar { padding: 10px 16px; }
+				.message { max-width: 92%; }
+			}
 		</style>
 		<script src="https://cdn.jsdelivr.net/npm/@cloudflare/realtimekit@1.2.4/dist/browser.js"></script>
 	</head>
 	<body>
-		<header>
-			<h1>Travel Agent</h1>
-			<p>Single door: UI → Realtime → Gateway Worker → TravelAgent DO (RAG + Amadeus + LLM) → Realtime → UI.</p>
-			<p id="realtime-status" class="note">Connecting to Realtime…</p>
+		<header class="topbar">
+			<div class="logo-row">
+				<img
+					src="/travellite-logo-full.png"
+					alt="travellite"
+					style="height: 32px"
+				/>
+			</div>
 		</header>
-		<div class="chat-container">
-			<div id="chat-messages" class="chat-messages">
-				<div class="message assistant-message">
-					<p>Hi, I'm your travel agent. Plan trips, flights, hotels, activities. Type a message and send; responses stream via Realtime.</p>
+
+		<div class="page-header" id="page-header">
+			<h1><span class="brand-travel">travel</span><span class="brand-lite">lite</span></h1>
+			<p class="subtitle">Plan trips, flights, hotels & activities</p>
+			<p id="realtime-status">Connecting…</p>
+		</div>
+
+		<div class="chat-wrapper">
+			<div class="chat-card">
+				<div id="chat-messages" class="chat-messages">
+					<div class="message assistant-message">
+						<div class="avatar" aria-hidden="true"></div>
+						<p>Hi, I'm your travel agent. Plan trips, find flights and hotels, or ask for activities. Type below or pick a quick action.</p>
+					</div>
+				</div>
+
+				<div id="typing-indicator" class="typing">
+					<div class="typing-dots">
+						<span></span><span></span><span></span>
+					</div>
+					<span>travellite is planning your trip…</span>
+				</div>
+
+				<div class="chips-row">
+					<button type="button" class="chip" data-prompt="Plan a weekend getaway for two with a relaxed vibe">Weekend getaway</button>
+					<button type="button" class="chip" data-prompt="I need a business trip with a direct flight and a hotel near the city center">Business trip</button>
+					<button type="button" class="chip" data-prompt="Plan a multi-city trip across 3 European cities">Multi-city</button>
+				</div>
+
+				<div class="input-row">
+					<div class="input-wrap">
+						<textarea id="user-input" placeholder="e.g. Plan a 3-day trip to Austin under $800, live music and food" rows="1"></textarea>
+						<button id="send-button" type="button">Send</button>
+					</div>
 				</div>
 			</div>
-			<div id="typing" class="typing" style="display: none;">Thinking…</div>
-			<div class="input-row">
-				<textarea id="user-input" placeholder="e.g. Plan a 3-day trip to Austin under $800, live music and food" rows="1"></textarea>
-				<button id="send-button">Send</button>
-			</div>
 		</div>
+
 		<script>
 			const chatMessages = document.getElementById('chat-messages');
 			const userInput = document.getElementById('user-input');
 			const sendButton = document.getElementById('send-button');
-			const typingEl = document.getElementById('typing');
+			const typingEl = document.getElementById('typing-indicator');
 			const statusEl = document.getElementById('realtime-status');
 			let isProcessing = false;
 			let meeting = null;
@@ -127,10 +369,23 @@
 			});
 			sendButton.addEventListener('click', send);
 
+			document.querySelectorAll('.chip').forEach((chip) => {
+				chip.addEventListener('click', () => {
+					document.querySelectorAll('.chip').forEach((c) => c.classList.remove('selected'));
+					chip.classList.add('selected');
+					const prompt = chip.getAttribute('data-prompt');
+					if (prompt) userInput.value = prompt;
+				});
+			});
+
 			function appendMessage(role, content) {
 				const div = document.createElement('div');
 				div.className = 'message ' + role + '-message';
-				div.innerHTML = '<p></p>';
+				if (role === 'assistant') {
+					div.innerHTML = '<div class="avatar" aria-hidden="true"></div><p></p>';
+				} else {
+					div.innerHTML = '<p></p><span class="sent-check" aria-hidden="true">✓</span>';
+				}
 				div.querySelector('p').textContent = content;
 				chatMessages.appendChild(div);
 				chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -145,9 +400,9 @@
 						const step = err.step || '';
 						const details = err.details != null ? (typeof err.details === 'string' ? err.details : JSON.stringify(err.details)) : err.message || res.statusText;
 						if (res.status === 503) {
-							statusEl.textContent = 'Realtime token not configured. Send still works; responses stream to Realtime room ' + roomId + '. Set REALTIME_ACCOUNT_ID, REALTIME_APP_ID, CLOUDFLARE_API_TOKEN to connect.';
+							statusEl.textContent = 'Send-only mode: responses still stream to the UI.';
 						} else {
-							statusEl.textContent = 'Token error (' + (step || res.status) + '): ' + (details.substring(0, 200) + (details.length > 200 ? '…' : ''));
+							statusEl.textContent = 'Token error (' + (step || res.status) + '): ' + (details.substring(0, 120) + (details.length > 120 ? '…' : ''));
 						}
 						return;
 					}
@@ -156,7 +411,7 @@
 					roomId = meetingId || roomId;
 					sessionStorage.setItem('travel-agent-room', roomId);
 					if (typeof RealtimeKit === 'undefined') {
-						statusEl.textContent = 'RealtimeKit not loaded. Send-only mode: responses will still stream to the UI.';
+						statusEl.textContent = 'Send-only: responses stream to the UI.';
 						return;
 					}
 					meeting = await RealtimeKit.init({
@@ -164,11 +419,11 @@
 						defaults: { audio: false, video: false }
 					});
 					await meeting.join();
-					statusEl.textContent = 'Connected to Realtime room. Messages and responses stream here.';
+					statusEl.textContent = 'Connected. Messages and responses stream here.';
 					if (meeting.chat && meeting.chat.messages) {
 						const checkMessages = () => {
 							const messages = meeting.chat.messages || [];
-							messages.forEach((msg, i) => {
+							messages.forEach((msg) => {
 								if (msg._seen) return;
 								msg._seen = true;
 								const text = (msg.content || msg.text || msg.message || '').trim();
@@ -184,7 +439,7 @@
 						setInterval(checkMessages, 300);
 					}
 				} catch (e) {
-					statusEl.textContent = 'Realtime init failed: ' + (e.message || 'Unknown error') + '. Send-only: responses will still stream to the UI.';
+					statusEl.textContent = 'Send-only: responses stream to the UI.';
 				}
 			}
 
@@ -196,22 +451,28 @@
 				isProcessing = true;
 				sendButton.disabled = true;
 				userInput.value = '';
-				appendMessage('user', message);
-				typingEl.style.display = 'block';
+				document.querySelectorAll('.chip').forEach((c) => c.classList.remove('selected'));
+
+				const userWrap = document.createElement('div');
+				userWrap.className = 'message user-message';
+				userWrap.innerHTML = '<p></p><span class="sent-check" aria-hidden="true">✓</span>';
+				userWrap.querySelector('p').textContent = message;
+				chatMessages.appendChild(userWrap);
+
+				typingEl.classList.add('visible');
 				chatMessages.scrollTop = chatMessages.scrollHeight;
 
 				const assistantWrap = document.createElement('div');
 				assistantWrap.className = 'message assistant-message';
-				assistantWrap.innerHTML = '<p></p>';
+				assistantWrap.innerHTML = '<div class="avatar" aria-hidden="true"></div><p></p>';
 				chatMessages.appendChild(assistantWrap);
 				const assistantP = assistantWrap.querySelector('p');
 
 				try {
 					if (meeting && meeting.chat && typeof meeting.chat.sendTextMessage === 'function') {
 						await meeting.chat.sendTextMessage(message);
-						assistantP.textContent = 'Streaming… (responses appear here from Realtime)';
+						assistantP.textContent = 'Streaming…';
 					} else {
-						// Send-only: no Realtime room joined. Still show response by streaming from Worker.
 						const streamRes = await fetch('/api/agents/TravelAgent/stream', {
 							method: 'POST',
 							headers: { 'Content-Type': 'application/json' },
@@ -256,7 +517,7 @@
 				} catch (err) {
 					assistantP.textContent = 'Error: ' + (err.message || 'Something went wrong');
 				} finally {
-					typingEl.style.display = 'none';
+					typingEl.classList.remove('visible');
 					sendButton.disabled = false;
 					isProcessing = false;
 					userInput.focus();
