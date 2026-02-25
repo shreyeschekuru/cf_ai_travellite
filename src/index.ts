@@ -177,21 +177,93 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 /**
+ * Accumulate SSE stream into a single string (for persisting assistant reply).
+ */
+async function accumulateSSEStream(stream: ReadableStream<Uint8Array>, maxLength = 15000): Promise<string> {
+	const reader = stream.getReader();
+	const decoder = new TextDecoder();
+	let buffer = "";
+	let text = "";
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (value) buffer += decoder.decode(value, { stream: true });
+			const parsed = parseSSEChunk(buffer);
+			buffer = parsed.buffer;
+			for (const content of parsed.contents) {
+				if (text.length + content.length > maxLength) {
+					text += content.slice(0, maxLength - text.length);
+					break;
+				}
+				text += content;
+			}
+			if (done) break;
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	return text;
+}
+
+/**
  * Handle streaming chat using the travel-agent pipeline (RAG + tools + LLM).
- * POST body: { message: string }. Returns Workers AI SSE stream.
+ * Uses per-session state from TravelAgent DO so the LLM sees conversation history.
+ * POST body: { message: string, sessionId?: string }. Returns Workers AI SSE stream.
  */
 async function handleTravelAgentStream(request: Request, env: Env): Promise<Response> {
 	try {
-		const body = (await request.json()) as { message?: string };
+		const body = (await request.json()) as { message?: string; sessionId?: string };
 		const message = typeof body?.message === "string" ? body.message.trim() : "";
+		const sessionId = typeof body?.sessionId === "string" && body.sessionId.trim() ? body.sessionId.trim() : "default";
 		if (!message) {
 			return new Response(JSON.stringify({ error: "message is required" }), {
 				status: 400,
 				headers: { "content-type": "application/json" },
 			});
 		}
-		const stream = await runPipeline(env, message, {});
-		return new Response(stream, {
+
+		// Load session state from TravelAgent DO
+		let tripState: { basics?: Record<string, unknown>; preferences?: string[]; recentMessages?: Array<{ role: "user" | "assistant"; content: string }> } = {};
+		try {
+			const rpcRequest = new Request(new URL(`/agents/TravelAgent/${sessionId}/rpc`, request.url).toString(), {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ type: "rpc", id: "get-state-" + Date.now(), method: "getState", args: [] }),
+			});
+			const stateRes = await routeTravelAgentRequest(rpcRequest, env);
+			if (stateRes?.ok) {
+				const data = (await stateRes.json()) as { result?: typeof tripState };
+				if (data.result) tripState = data.result;
+			}
+		} catch (e) {
+			console.warn("[TravelAgent stream] getState failed, using empty state:", e);
+		}
+
+		const stream = await runPipeline(env, message, tripState);
+		const [clientStream, accStream] = stream.tee();
+
+		// Persist assistant response to DO when stream completes
+		(async () => {
+			try {
+				const accumulated = await accumulateSSEStream(accStream);
+				if (!accumulated.trim()) return;
+				const appendRequest = new Request(new URL(`/agents/TravelAgent/${sessionId}/rpc`, request.url).toString(), {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						type: "rpc",
+						id: "append-" + Date.now(),
+						method: "appendConversation",
+						args: [message, accumulated],
+					}),
+				});
+				await routeTravelAgentRequest(appendRequest, env);
+			} catch (e) {
+				console.warn("[TravelAgent stream] appendConversation failed:", e);
+			}
+		})();
+
+		return new Response(clientStream, {
 			headers: {
 				"content-type": "text/event-stream; charset=utf-8",
 				"cache-control": "no-cache",

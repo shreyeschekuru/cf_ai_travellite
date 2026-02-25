@@ -19,14 +19,14 @@
 		"enabled": false,
 		"head_sampling_rate": 1,
 		"logs": {
-		  "enabled": true,
+		  "enabled": false,
 		  "head_sampling_rate": 1,
-		  "persist": true,
-		  "invocation_logs": true
+		  "persist": false,
+		  "invocation_logs": false
 		},
 		"traces": {
 		  "enabled": false,
-		  "persist": true,
+		  "persist": false,
 		  "head_sampling_rate": 1
 		}
 	},

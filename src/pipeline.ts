@@ -15,6 +15,8 @@ const TOOLS_TIMEOUT_MS = 10_000;
 export interface PipelineTripState {
 	basics?: { destination?: string; startDate?: string; endDate?: string; budget?: number };
 	preferences?: string[];
+	/** Last N messages for LLM context (user/assistant). Capped when stored. */
+	recentMessages?: Array<{ role: "user" | "assistant"; content: string }>;
 }
 
 const defaultTripState: PipelineTripState = {
@@ -412,6 +414,8 @@ async function useTools(env: Env, message: string, tripState: PipelineTripState)
 	}
 }
 
+const MAX_HISTORY_MESSAGES = 10;
+
 async function generateLLMResponse(
 	env: Env,
 	userMessage: string,
@@ -421,6 +425,7 @@ async function generateLLMResponse(
 ): Promise<ReadableStream> {
 	const basics = tripState.basics || {};
 	const prefs = tripState.preferences || [];
+	const history = (tripState.recentMessages || []).slice(-MAX_HISTORY_MESSAGES);
 	const systemPrompt = `You are a helpful travel assistant. You help users plan trips, find flights, and discover destinations.
 
 Current trip information:
@@ -432,12 +437,13 @@ Current trip information:
 ${ragContext ? `\nRelevant context: ${ragContext}` : ""}
 ${toolResults ? `\nTool results: ${toolResults}` : ""}
 
-Provide helpful, personalized travel advice based on the user's query and the information available.`;
-	const messages = [
-		{ role: "system" as const, content: systemPrompt },
-		{ role: "user" as const, content: userMessage },
+Provide helpful, personalized travel advice based on the user's query and the information available. Use the conversation history when provided to remember context and preferences.`;
+	const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+		{ role: "system", content: systemPrompt },
+		...history.map((m) => ({ role: m.role, content: m.content })),
+		{ role: "user", content: userMessage },
 	];
-	console.log("[Pipeline LLM] Calling Workers AI (stream: true)");
+	console.log("[Pipeline LLM] Calling Workers AI (stream: true), history messages:", history.length);
 	const aiResponse = await env.AI.run(LLM_MODEL, { messages, max_tokens: 1024, stream: true });
 	if (!aiResponse) throw new Error("AI.run returned null");
 	if (!(aiResponse instanceof ReadableStream)) throw new Error(`AI.run did not return ReadableStream, got: ${typeof aiResponse}`);
@@ -469,7 +475,7 @@ export async function runPipeline(
 			])
 		: Promise.resolve("");
 	const [ragResult, toolsResult] = await Promise.all([ragPromise, toolsPromise]);
-	console.log("[Pipeline] RAG result length:", ragResult?.length ?? 0, "| Tools result length:", toolsResult?.length ?? 0);
+	console.log("[Pipeline] RAG result length:", ragResult?.length ?? 0, "| Tools result length:", toolsResult?.length ?? 0, "| History:", tripState.recentMessages?.length ?? 0);
 	return generateLLMResponse(env, message, ragResult, toolsResult, tripState);
 }
 

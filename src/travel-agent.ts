@@ -163,6 +163,12 @@ export class TravelAgent extends Agent<Env, TravelState> {
 							case "callAmadeusAPI":
 								method = this.callAmadeusAPI;
 								break;
+							case "getState":
+								method = this.getState;
+								break;
+							case "appendConversation":
+								method = this.appendConversation;
+								break;
 						}
 					}
 					if (method && typeof method === "function") {
@@ -806,6 +812,29 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		}
 	}
 
+	/** Max conversation messages to keep in state (10 turns). */
+	private static readonly MAX_RECENT_MESSAGES = 20;
+
+	@callable({ description: "Return current trip state and conversation history for session memory" })
+	getState(): { basics: TripBasics; preferences: string[]; recentMessages: TravelState["recentMessages"] } {
+		return {
+			basics: this.state.basics,
+			preferences: [...this.state.preferences],
+			recentMessages: this.state.recentMessages.slice(-TravelAgent.MAX_RECENT_MESSAGES),
+		};
+	}
+
+	@callable({ description: "Append user and assistant messages to conversation history and persist" })
+	async appendConversation(userMessage: string, assistantMessage: string): Promise<{ success: boolean }> {
+		this.extractTripInfo(userMessage);
+		const next = [
+			...this.state.recentMessages,
+			{ role: "user" as const, content: userMessage },
+			{ role: "assistant" as const, content: assistantMessage },
+		].slice(-TravelAgent.MAX_RECENT_MESSAGES);
+		this.setState({ ...this.state, recentMessages: next });
+		return { success: true };
+	}
 
 	/**
 	 * Main message handler that orchestrates RAG, tools, and LLM
@@ -824,17 +853,28 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	): Promise<{ success: boolean; message?: string; error?: string }> {
 		console.log("[TravelAgent] handleMessageStreaming: Starting");
 
+		// Persist user message and build trip state with history for context
+		this.setState({
+			...this.state,
+			recentMessages: [
+				...this.state.recentMessages,
+				{ role: "user" as const, content: input },
+			].slice(-TravelAgent.MAX_RECENT_MESSAGES),
+		});
+		this.extractTripInfo(input);
+
 		const tripState: PipelineTripState = {
 			basics: this.state.basics,
 			preferences: this.state.preferences,
+			recentMessages: this.state.recentMessages,
 		};
 
-		// Run the shared pipeline inside this DO for direct RPC callers,
-		// then stream chunks to Realtime via this DO.
+		// Run pipeline with history, stream to Realtime, and persist assistant response when done
 		(async () => {
 			try {
 				const stream = await runPipeline(this.env as Env, input, tripState);
-				await this.streamToRealtime(stream, roomId, userId);
+				const streamWithAccumulator = this.transformStreamForState(stream, input);
+				await this.streamToRealtime(streamWithAccumulator, roomId, userId);
 				console.log("[TravelAgent] handleMessageStreaming: Streaming completed in background");
 			} catch (error) {
 				console.error("[TravelAgent] handleMessageStreaming: Error in background processing:", error);
@@ -984,10 +1024,11 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		// 2. Extract and update trip basics from message
 		this.extractTripInfo(input);
 
-		// 3. Run shared Worker-style pipeline inside the DO for direct RPC callers
+		// 3. Run shared pipeline with conversation history for context
 		const tripState: PipelineTripState = {
 			basics: this.state.basics,
 			preferences: this.state.preferences,
+			recentMessages: this.state.recentMessages,
 		};
 
 		let stream: ReadableStream;
