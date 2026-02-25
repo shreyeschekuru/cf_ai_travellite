@@ -52,8 +52,78 @@ const AMADEUS_API_SPEC: Record<string, { requiredParams: string[]; optionalParam
 	getRecommendedLocations: { requiredParams: [], optionalParams: ["cityCodes", "travelerCountryCode"], dataFormat: "GET query params" },
 };
 
+/** Human-readable prompt for the user when a required param is missing (API -> message for LLM to ask). */
+const MISSING_PARAM_ASK_USER: Record<string, Record<string, string>> = {
+	searchFlightOffers: {
+		originLocationCode: "To find flights I need your departure city or airport code. Where will you be flying from? (e.g. NYC, Dallas, LAX)",
+		destinationLocationCode: "I need the destination city or airport code. Where would you like to fly to?",
+		departureDate: "What date will you be departing? (e.g. 2025-06-15 or 'next Friday')",
+	},
+	searchTransfers: {
+		originLocationCode: "Which airport or location will you be transferred from?",
+		destinationLocationCode: "Which airport or location is your transfer destination?",
+		departureDateTime: "When do you need the transfer? (date and time)",
+	},
+	searchHotelOffers: {
+		cityCode: "Which city will you be staying in? I need the city or city code for hotel search.",
+		checkInDate: "What is your check-in date? (YYYY-MM-DD)",
+		checkOutDate: "What is your check-out date? (YYYY-MM-DD)",
+	},
+};
+
+/**
+ * Resolve API params from tripState and incoming params; check required params.
+ * Returns either { ok: true, params } or { ok: false, askUser } so the orchestrator can ask the user instead of calling the API.
+ */
+function resolveApiParamsAndCheckMissing(
+	apiName: string,
+	params: Record<string, unknown>,
+	tripState: PipelineTripState,
+): { ok: true; params: Record<string, unknown> } | { ok: false; askUser: string; missingParams: string[] } {
+	const basics = tripState.basics || {};
+	const resolved = { ...params };
+
+	// Map tripState.basics into API param names where applicable
+	if (apiName === "searchFlightOffers") {
+		resolved.originLocationCode = resolved.originLocationCode ?? resolved.origin ?? basics.origin;
+		resolved.destinationLocationCode = resolved.destinationLocationCode ?? resolved.destination ?? basics.destination;
+		resolved.departureDate = resolved.departureDate ?? basics.startDate;
+		resolved.returnDate = resolved.returnDate ?? basics.endDate;
+	}
+	if (apiName === "searchHotelOffers") {
+		resolved.cityCode = resolved.cityCode ?? basics.destination;
+		resolved.checkInDate = resolved.checkInDate ?? basics.startDate;
+		resolved.checkOutDate = resolved.checkOutDate ?? basics.endDate;
+	}
+	if (apiName === "searchTransfers") {
+		resolved.originLocationCode = resolved.originLocationCode ?? resolved.origin ?? basics.origin;
+		resolved.destinationLocationCode = resolved.destinationLocationCode ?? resolved.destination ?? basics.destination;
+		resolved.departureDateTime = resolved.departureDateTime ?? basics.startDate;
+	}
+
+	const spec = AMADEUS_API_SPEC[apiName];
+	if (!spec || !spec.requiredParams.length) {
+		return { ok: true, params: resolved };
+	}
+
+	const missingKeys: string[] = [];
+	const askMessages: string[] = [];
+	for (const key of spec.requiredParams) {
+		const val = resolved[key];
+		if (val !== undefined && val !== null && String(val).trim() !== "") continue;
+		missingKeys.push(key);
+		const askMap = MISSING_PARAM_ASK_USER[apiName];
+		askMessages.push(askMap?.[key] ?? `Please provide: ${key}`);
+	}
+
+	if (missingKeys.length > 0) {
+		return { ok: false, askUser: askMessages[0], missingParams: missingKeys };
+	}
+	return { ok: true, params: resolved };
+}
+
 export interface PipelineTripState {
-	basics?: { destination?: string; startDate?: string; endDate?: string; budget?: number };
+	basics?: { origin?: string; destination?: string; startDate?: string; endDate?: string; budget?: number };
 	preferences?: string[];
 	/** Last N messages for LLM context (user/assistant). Capped when stored. */
 	recentMessages?: Array<{ role: "user" | "assistant"; content: string }>;
@@ -159,6 +229,7 @@ async function determineAmadeusAPICall(
 User query: "${message}"
 
 Current trip state:
+- Origin (departure city/code): ${basics.origin ?? "not specified"}
 - Destination: ${basics.destination ?? "not specified"}
 - Dates: ${basics.startDate ?? "not specified"} to ${basics.endDate ?? "not specified"}
 - Budget: ${basics.budget ?? "not specified"}
@@ -405,8 +476,8 @@ async function useTools(env: Env, message: string, tripState: PipelineTripState)
 		const city = basics.destination;
 		if (!apiCall?.apiName) {
 			const lower = message.toLowerCase();
-			if (lower.includes("flight") && basics.destination && basics.startDate) {
-				apiCall = { apiName: "searchFlightOffers", params: { origin: "NYC", destination: basics.destination, departureDate: basics.startDate, returnDate: basics.endDate } };
+			if (lower.includes("flight") && (basics.destination || basics.startDate)) {
+				apiCall = { apiName: "searchFlightOffers", params: { origin: basics.origin, destination: basics.destination, departureDate: basics.startDate, returnDate: basics.endDate } };
 			} else if ((lower.includes("hotel") || lower.includes("accommodation")) && basics.destination) {
 				apiCall = { apiName: "searchHotelOffers", params: { cityCode: city, checkInDate: basics.startDate, checkOutDate: basics.endDate, adults: 2 } };
 			} else if (lower.includes("activity") || lower.includes("tour") || lower.includes("things to do")) {
@@ -419,11 +490,34 @@ async function useTools(env: Env, message: string, tripState: PipelineTripState)
 			console.log("[Pipeline Tools] No API call determined, skipping");
 			return "";
 		}
+
+		const resolved = resolveApiParamsAndCheckMissing(apiCall.apiName, (apiCall.params || {}) as Record<string, unknown>, tripState);
+		if (!resolved.ok) {
+			const spec = AMADEUS_API_SPEC[apiCall.apiName] ?? { requiredParams: [], optionalParams: [], dataFormat: "" };
+			console.log(
+				"[Pipeline Tools] Missing required params — expected API input:",
+				JSON.stringify(
+					{
+						apiName: apiCall.apiName,
+						requiredParams: spec.requiredParams,
+						optionalParams: spec.optionalParams,
+						dataFormat: spec.dataFormat,
+						missingParams: resolved.missingParams,
+						currentParams: apiCall.params,
+					},
+					null,
+					2,
+				),
+			);
+			return `[Missing required info for ${apiCall.apiName}. Ask the user: "${resolved.askUser}" Use your next response to ask them; when they reply, their answer will be in context for the next API call.]`;
+		}
+		const finalParams = resolved.params;
+
 		console.log("[Pipeline Tools] Calling Amadeus API:", apiCall.apiName);
 		const spec = AMADEUS_API_SPEC[apiCall.apiName] ?? { requiredParams: [], optionalParams: [], dataFormat: "see Amadeus API docs" };
 		console.log("[Pipeline Tools] Amadeus API required params and data format:", JSON.stringify({ apiName: apiCall.apiName, ...spec }, null, 2));
-		console.log("[Pipeline Tools] Amadeus API raw input:", JSON.stringify({ apiName: apiCall.apiName, params: apiCall.params }, null, 2));
-		const result = await callAmadeusAPI(client, apiCall.apiName, apiCall.params as Record<string, unknown>);
+		console.log("[Pipeline Tools] Amadeus API raw input:", JSON.stringify({ apiName: apiCall.apiName, params: finalParams }, null, 2));
+		const result = await callAmadeusAPI(client, apiCall.apiName, finalParams as Record<string, unknown>);
 		const toolResults: string[] = [];
 		if (result.success && result.data) {
 			let resultType = "general";
@@ -522,7 +616,8 @@ Current trip information:
 ${ragContext ? `\nRelevant context: ${ragContext}` : ""}
 ${toolResults ? `\nTool results: ${toolResults}` : ""}
 
-Provide helpful, personalized travel advice based on the user's query and the information available. Use the conversation history when provided to remember context and preferences.`;
+Provide helpful, personalized travel advice based on the user's query and the information available. Use the conversation history when provided to remember context and preferences.
+If tool results indicate "Missing required info" and tell you to ask the user something, respond by asking the user exactly that in a friendly way. Do not make up or assume values. Once the user replies with the missing information (e.g. departure city, dates), that context will be saved and the next message can proceed with the API call.`;
 
 	const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
 		{ role: "system", content: systemPrompt },

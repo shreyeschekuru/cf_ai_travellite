@@ -7,6 +7,8 @@ import { runPipeline, type PipelineTripState } from "./pipeline";
  * Basic trip information
  */
 export type TripBasics = {
+	/** Departure city or airport code (e.g. NYC, Dallas) for flights */
+	origin?: string;
 	destination?: string;
 	startDate?: string;
 	endDate?: string;
@@ -1057,6 +1059,21 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		const lowerMessage = message.toLowerCase();
 		const updates: Partial<TravelState> = {};
 
+		// Extract origin (departure city for flights)
+		const originMatch = message.match(
+			/(?:departing from|flying from|fly from|leaving from|from)\s+([A-Z]{3}|[A-Z][a-zA-Z\s]+?)(?:\s|,|\.|$)/i,
+		);
+		if (originMatch && !this.state.basics.origin) {
+			const origin = originMatch[1].trim();
+			if (origin.length >= 2 && !/^\d{4}-\d{2}-\d{2}$/.test(origin) && !/^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(origin)) {
+				updates.basics = {
+					...this.state.basics,
+					...updates.basics,
+					origin,
+				};
+			}
+		}
+
 		// Extract destination
 		const destinationMatch = message.match(
 			/(?:going to|visit|travel to|destination|trip to)\s+([A-Z][a-zA-Z\s]+)/i,
@@ -1064,6 +1081,7 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		if (destinationMatch && !this.state.basics.destination) {
 			updates.basics = {
 				...this.state.basics,
+				...updates.basics,
 				destination: destinationMatch[1].trim(),
 			};
 		}
@@ -1481,11 +1499,11 @@ Extract relevant parameters from the query and trip state.`;
 				const lowerMessage = message.toLowerCase();
 				
 				// Quick keyword-based routing for most common queries
-				if (lowerMessage.includes("flight") && this.state.basics.destination && this.state.basics.startDate) {
+				if (lowerMessage.includes("flight") && (this.state.basics.destination || this.state.basics.startDate)) {
 					apiCall = {
 						apiName: "searchFlightOffers",
 						params: {
-							origin: "NYC", // Default or extract from message
+							origin: this.state.basics.origin,
 							destination: this.state.basics.destination,
 							departureDate: this.state.basics.startDate,
 							returnDate: this.state.basics.endDate,
