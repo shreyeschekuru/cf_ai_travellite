@@ -136,7 +136,7 @@ async function main() {
 	const requiredSecrets = ['AMADEUS_API_KEY', 'AMADEUS_API_SECRET'];
 	
 	// Optional secrets (will be set if present, but won't fail if missing)
-	const optionalSecrets = ['REALTIME_APP_ID', 'CLOUDFLARE_API_TOKEN', 'REALTIME_API_TOKEN', 'REALTIME_NAMESPACE_ID', 'REALTIME_ACCOUNT_ID'];
+	const optionalSecrets = ['REALTIME_APP_ID', 'CLOUDFLARE_API_TOKEN', 'REALTIME_API_TOKEN', 'REALTIME_NAMESPACE_ID', 'REALTIME_ACCOUNT_ID', 'REALTIME_PRESET_NAME'];
 	
 	let successCount = 0;
 	let failCount = 0;

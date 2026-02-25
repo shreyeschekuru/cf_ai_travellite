@@ -142,7 +142,13 @@
 					const res = await fetch('/api/realtime/token');
 					if (!res.ok) {
 						const err = await res.json().catch(() => ({}));
-						statusEl.textContent = 'Realtime token not configured. Send still works; responses stream to Realtime room ' + roomId + '. Set REALTIME_ACCOUNT_ID, REALTIME_APP_ID, CLOUDFLARE_API_TOKEN to connect.';
+						const step = err.step || '';
+						const details = err.details != null ? (typeof err.details === 'string' ? err.details : JSON.stringify(err.details)) : err.message || res.statusText;
+						if (res.status === 503) {
+							statusEl.textContent = 'Realtime token not configured. Send still works; responses stream to Realtime room ' + roomId + '. Set REALTIME_ACCOUNT_ID, REALTIME_APP_ID, CLOUDFLARE_API_TOKEN to connect.';
+						} else {
+							statusEl.textContent = 'Token error (' + (step || res.status) + '): ' + (details.substring(0, 200) + (details.length > 200 ? '…' : ''));
+						}
 						return;
 					}
 					const { meetingId, authToken } = await res.json();

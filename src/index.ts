@@ -259,6 +259,8 @@ async function handleRealtimeSend(request: Request, env: Env): Promise<Response>
 /**
  * GET /api/realtime/token — return Realtime participant auth token and meeting/room id for the frontend.
  * Requires REALTIME_ACCOUNT_ID, REALTIME_APP_ID, CLOUDFLARE_API_TOKEN.
+ * Optional: REALTIME_PRESET_NAME or query ?preset=name (e.g. group-call-host, webinar-participant).
+ * If not set, we try to list presets and use the first one.
  */
 async function handleRealtimeToken(request: Request, env: Env): Promise<Response> {
 	const accountId = env.REALTIME_ACCOUNT_ID;
@@ -271,21 +273,76 @@ async function handleRealtimeToken(request: Request, env: Env): Promise<Response
 		);
 	}
 	try {
+		// Preset name: env > query param > list presets (first) > fallbacks
+		const urlPreset = new URL(request.url).searchParams.get("preset")?.trim();
+		let presetName: string | undefined =
+			(env as { REALTIME_PRESET_NAME?: string }).REALTIME_PRESET_NAME ?? (urlPreset ? urlPreset : undefined);
+		if (!presetName) {
+			const presetsUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/realtime/kit/${appId}/presets`;
+			const presetsRes = await fetch(presetsUrl, {
+				headers: { "Authorization": `Bearer ${token}` },
+			});
+			const presetsBody = await presetsRes.text();
+			if (presetsRes.ok) {
+				const presetsData = (() => {
+					try {
+						return JSON.parse(presetsBody) as { result?: Array<{ name?: string }>; data?: Array<{ name?: string }> };
+					} catch {
+						return {};
+					}
+				})();
+				const list = presetsData.result ?? presetsData.data ?? [];
+				const first = Array.isArray(list) ? list[0] : undefined;
+				if (first && typeof first === "object" && first.name) {
+					presetName = first.name;
+				}
+			}
+		}
+		presetName = presetName || "group-call-host";
+
 		const createUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/realtime/kit/${appId}/meetings`;
 		const createRes = await fetch(createUrl, {
 			method: "POST",
 			headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ title: "Travel Agent " + Date.now() }),
 		});
+		const createBody = await createRes.text();
 		if (!createRes.ok) {
-			const t = await createRes.text();
-			console.error("[RealtimeToken] Create meeting failed:", createRes.status, t);
-			return Response.json({ error: "Failed to create meeting", details: t }, { status: 502 });
+			console.error("[RealtimeToken] Create meeting failed:", createRes.status, createBody);
+			let details: unknown = createBody;
+			try {
+				details = JSON.parse(createBody);
+			} catch {
+				// keep as string
+			}
+			return Response.json(
+				{ error: "Failed to create meeting", step: "create_meeting", status: createRes.status, details },
+				{ status: 502 },
+			);
 		}
-		const createData = (await createRes.json()) as { result?: { id?: string }; success?: boolean };
-		const meetingId = createData.result?.id;
+		const createData = (() => {
+			try {
+				return JSON.parse(createBody) as {
+					result?: { id?: string; meeting?: { id?: string }; [k: string]: unknown };
+					data?: { id?: string; [k: string]: unknown };
+					success?: boolean;
+				};
+			} catch {
+				return {};
+			}
+		})();
+		const meetingId =
+			createData.result?.id ??
+			createData.data?.id ??
+			(createData.result as { meeting?: { id?: string } })?.meeting?.id ??
+			(createData.result && typeof createData.result === "object" && "id" in createData.result
+				? String((createData.result as { id?: string }).id)
+				: undefined);
 		if (!meetingId) {
-			return Response.json({ error: "No meeting id in response" }, { status: 502 });
+			return Response.json(
+				{ error: "No meeting id in response", step: "create_meeting", details: createData },
+				{ status: 502 },
+			);
 		}
 		const partUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/realtime/kit/${appId}/meetings/${meetingId}/participants`;
 		const partRes = await fetch(partUrl, {
@@ -293,19 +350,45 @@ async function handleRealtimeToken(request: Request, env: Env): Promise<Response
 			headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({
 				name: "User",
-				preset_name: "default",
+				preset_name: presetName,
 				custom_participant_id: "web-" + Date.now(),
 			}),
 		});
+		const partBody = await partRes.text();
 		if (!partRes.ok) {
-			const t = await partRes.text();
-			console.error("[RealtimeToken] Add participant failed:", partRes.status, t);
-			return Response.json({ error: "Failed to add participant", details: t }, { status: 502 });
+			console.error("[RealtimeToken] Add participant failed:", partRes.status, partBody);
+			let details: unknown = partBody;
+			try {
+				details = JSON.parse(partBody);
+			} catch {
+				// keep as string
+			}
+			return Response.json(
+				{ error: "Failed to add participant", step: "add_participant", status: partRes.status, details },
+				{ status: 502 },
+			);
 		}
-		const partData = (await partRes.json()) as { result?: { auth_token?: string }; success?: boolean };
-		const authToken = partData.result?.auth_token;
+		const partData = (() => {
+			try {
+				return JSON.parse(partBody) as {
+					result?: { auth_token?: string; authToken?: string; [k: string]: unknown };
+					data?: { auth_token?: string; authToken?: string; [k: string]: unknown };
+					success?: boolean;
+				};
+			} catch {
+				return {};
+			}
+		})();
+		const authToken =
+			partData.result?.auth_token ??
+			partData.result?.authToken ??
+			partData.data?.auth_token ??
+			partData.data?.authToken;
 		if (!authToken) {
-			return Response.json({ error: "No auth_token in response" }, { status: 502 });
+			return Response.json(
+				{ error: "No auth_token in response", step: "add_participant", details: partData },
+				{ status: 502 },
+			);
 		}
 		return Response.json({ meetingId, roomId: meetingId, authToken });
 	} catch (e) {
