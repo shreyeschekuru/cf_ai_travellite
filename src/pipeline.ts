@@ -12,6 +12,46 @@ const LLM_MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8";
 const RAG_TIMEOUT_MS = 5_000;
 const TOOLS_TIMEOUT_MS = 10_000;
 
+/** Required params and data format per Amadeus API (for logging before raw input). */
+const AMADEUS_API_SPEC: Record<string, { requiredParams: string[]; optionalParams?: string[]; dataFormat: string }> = {
+	searchFlightOffers: {
+		requiredParams: ["originLocationCode", "destinationLocationCode", "departureDate"],
+		optionalParams: ["returnDate", "adults", "children", "infants", "travelClass", "nonStop", "max"],
+		dataFormat: "GET query params: originLocationCode, destinationLocationCode, departureDate (YYYY-MM-DD); returnDate optional",
+	},
+	getFlightOfferPrice: { requiredParams: ["flightOffer"], optionalParams: [], dataFormat: "POST body: flightOffer object from searchFlightOffers" },
+	searchFlightDestinations: { requiredParams: ["origin"], optionalParams: ["departureDate", "oneWay"], dataFormat: "GET query params" },
+	searchCheapestFlightDates: { requiredParams: ["origin", "destination"], optionalParams: ["departureDate"], dataFormat: "GET query params" },
+	getMostTraveledDestinations: { requiredParams: ["originCityCode"], optionalParams: ["period"], dataFormat: "GET query params" },
+	getMostBookedDestinations: { requiredParams: ["originCityCode"], optionalParams: ["period"], dataFormat: "GET query params" },
+	getBusiestPeriod: { requiredParams: ["cityCode"], optionalParams: ["period", "direction"], dataFormat: "GET query params" },
+	getFlightAvailabilities: { requiredParams: ["availabilityRequest"], optionalParams: [], dataFormat: "POST body: availabilityRequest" },
+	getSeatmap: { requiredParams: ["flightOffer"], optionalParams: [], dataFormat: "POST body: flightOffer" },
+	getFlightStatus: { requiredParams: ["carrierCode", "flightNumber", "scheduledDepartureDate"], optionalParams: [], dataFormat: "GET query params" },
+	searchAirlines: { requiredParams: [], optionalParams: ["airlineCodes"], dataFormat: "GET query params" },
+	getAirlineRoutes: { requiredParams: ["departureAirportCode"], optionalParams: ["max"], dataFormat: "GET query params" },
+	searchLocations: { requiredParams: ["subType"], optionalParams: ["keyword", "countryCode"], dataFormat: "GET query params; subType: AIRPORT, CITY, etc." },
+	getAirportNearestRelevant: { requiredParams: ["latitude", "longitude"], optionalParams: ["radius"], dataFormat: "GET query params" },
+	getAirportRoutes: { requiredParams: ["departureAirportCode"], optionalParams: ["max"], dataFormat: "GET query params" },
+	getBrandedFaresUpsell: { requiredParams: ["flightOffer"], optionalParams: [], dataFormat: "POST body: flightOffer" },
+	getFlightCheckinLinks: { requiredParams: ["airlineCode"], optionalParams: [], dataFormat: "GET query params" },
+	getAirportOnTimePerformance: { requiredParams: ["airportCode", "date"], optionalParams: [], dataFormat: "GET query params" },
+	searchCities: { requiredParams: [], optionalParams: ["keyword", "countryCode", "max"], dataFormat: "GET query params" },
+	searchHotelsByGeocode: { requiredParams: ["latitude", "longitude"], optionalParams: ["radius", "checkIn", "checkOut"], dataFormat: "GET query params" },
+	searchHotelsByCity: { requiredParams: ["cityCode"], optionalParams: ["hotelSource"], dataFormat: "GET query params" },
+	searchHotelOffers: {
+		requiredParams: [],
+		optionalParams: ["hotelIds", "cityCode", "latitude", "longitude", "checkInDate", "checkOutDate", "adults", "roomQuantity"],
+		dataFormat: "GET query params; need cityCode or (latitude+longitude); checkInDate/checkOutDate YYYY-MM-DD",
+	},
+	searchHotelNameAutocomplete: { requiredParams: ["keyword"], optionalParams: ["hotelSource", "max"], dataFormat: "GET query params" },
+	getHotelRatings: { requiredParams: ["hotelIds"], optionalParams: [], dataFormat: "GET query params; hotelIds comma-separated" },
+	searchActivities: { requiredParams: [], optionalParams: ["latitude", "longitude", "radius", "pageLimit"], dataFormat: "GET query params" },
+	getActivity: { requiredParams: ["activityId"], optionalParams: ["lang"], dataFormat: "GET path + query params" },
+	searchTransfers: { requiredParams: ["originLocationCode", "destinationLocationCode", "departureDateTime"], optionalParams: [], dataFormat: "GET query params" },
+	getRecommendedLocations: { requiredParams: [], optionalParams: ["cityCodes", "travelerCountryCode"], dataFormat: "GET query params" },
+};
+
 export interface PipelineTripState {
 	basics?: { destination?: string; startDate?: string; endDate?: string; budget?: number };
 	preferences?: string[];
@@ -380,6 +420,8 @@ async function useTools(env: Env, message: string, tripState: PipelineTripState)
 			return "";
 		}
 		console.log("[Pipeline Tools] Calling Amadeus API:", apiCall.apiName);
+		const spec = AMADEUS_API_SPEC[apiCall.apiName] ?? { requiredParams: [], optionalParams: [], dataFormat: "see Amadeus API docs" };
+		console.log("[Pipeline Tools] Amadeus API required params and data format:", JSON.stringify({ apiName: apiCall.apiName, ...spec }, null, 2));
 		console.log("[Pipeline Tools] Amadeus API raw input:", JSON.stringify({ apiName: apiCall.apiName, params: apiCall.params }, null, 2));
 		const result = await callAmadeusAPI(client, apiCall.apiName, apiCall.params as Record<string, unknown>);
 		const toolResults: string[] = [];
@@ -416,6 +458,40 @@ async function useTools(env: Env, message: string, tripState: PipelineTripState)
 
 const MAX_HISTORY_MESSAGES = 10;
 
+async function summarizeHistory(
+	env: Env,
+	messages: Array<{ role: "user" | "assistant"; content: string }>,
+): Promise<string> {
+	if (!messages.length) return "";
+	const joined = messages
+		.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+		.join("\n");
+	const maxChars = 3000;
+	const clipped = joined.length > maxChars ? joined.slice(-maxChars) : joined;
+	try {
+		const response = await env.AI.run(LLM_MODEL, {
+			messages: [
+				{
+					role: "system",
+					content:
+						"You are a travel conversation summarizer. Produce a concise summary that preserves all important constraints (dates, budget, locations) and user preferences. Respond with 3-6 short bullet points in plain text.",
+				},
+				{ role: "user", content: clipped },
+			],
+			max_tokens: 256,
+		});
+		let text = "";
+		if (typeof response === "string") text = response;
+		else if (response && typeof response === "object" && "response" in response)
+			text = String((response as { response: unknown }).response);
+		else text = JSON.stringify(response);
+		return text.trim();
+	} catch (e) {
+		console.error("[Pipeline] summarizeHistory error:", e);
+		return "";
+	}
+}
+
 async function generateLLMResponse(
 	env: Env,
 	userMessage: string,
@@ -425,7 +501,16 @@ async function generateLLMResponse(
 ): Promise<ReadableStream> {
 	const basics = tripState.basics || {};
 	const prefs = tripState.preferences || [];
-	const history = (tripState.recentMessages || []).slice(-MAX_HISTORY_MESSAGES);
+	const fullHistory = tripState.recentMessages || [];
+
+	let summaryText = "";
+	let historyForContext = fullHistory;
+	if (fullHistory.length > MAX_HISTORY_MESSAGES) {
+		const older = fullHistory.slice(0, fullHistory.length - MAX_HISTORY_MESSAGES);
+		historyForContext = fullHistory.slice(-MAX_HISTORY_MESSAGES);
+		summaryText = await summarizeHistory(env, older);
+	}
+
 	const systemPrompt = `You are a helpful travel assistant. You help users plan trips, find flights, and discover destinations.
 
 Current trip information:
@@ -438,12 +523,28 @@ ${ragContext ? `\nRelevant context: ${ragContext}` : ""}
 ${toolResults ? `\nTool results: ${toolResults}` : ""}
 
 Provide helpful, personalized travel advice based on the user's query and the information available. Use the conversation history when provided to remember context and preferences.`;
+
 	const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
 		{ role: "system", content: systemPrompt },
-		...history.map((m) => ({ role: m.role, content: m.content })),
+		...(summaryText
+			? [
+					{
+						role: "system" as const,
+						content: `Summary of earlier conversation:\n${summaryText}`,
+					},
+			  ]
+			: []),
+		...historyForContext.map((m) => ({ role: m.role, content: m.content })),
 		{ role: "user", content: userMessage },
 	];
-	console.log("[Pipeline LLM] Calling Workers AI (stream: true), history messages:", history.length);
+
+	console.log(
+		"[Pipeline LLM] Calling Workers AI (stream: true), recent messages:",
+		historyForContext.length,
+		"older summarized:",
+		fullHistory.length > MAX_HISTORY_MESSAGES ? fullHistory.length - MAX_HISTORY_MESSAGES : 0,
+	);
+
 	const aiResponse = await env.AI.run(LLM_MODEL, { messages, max_tokens: 1024, stream: true });
 	if (!aiResponse) throw new Error("AI.run returned null");
 	if (!(aiResponse instanceof ReadableStream)) throw new Error(`AI.run did not return ReadableStream, got: ${typeof aiResponse}`);
