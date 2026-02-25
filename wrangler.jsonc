@@ -33,9 +33,9 @@
 	"placement": {
 		"mode": "smart"
 	},
-	"limits": {
+	/**"limits": {
 		"cpu_ms": 300000, // default is 30000 (30 seconds); current set to 300 seconds (5 minutes)
-	},
+	},*/
 	"ai": {
 		"binding": "AI"
 	},
