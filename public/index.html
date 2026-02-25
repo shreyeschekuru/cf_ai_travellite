@@ -12,7 +12,7 @@
 		/>
 		<style>
 			:root {
-				--cream: #FFFFC7;
+				--cream: #faf1d1;
 				--cream-card: #FFFFE0;
 				--primary: #B0413E;
 				--teal: #548687;
@@ -36,58 +36,6 @@
 				flex-direction: column;
 			}
 
-			/* Top bar */
-			.topbar {
-				display: flex;
-				align-items: center;
-				justify-content: flex-start;
-				padding: 12px 24px;
-				background: var(--cream);
-				border-bottom: 1px solid var(--teal-border);
-				box-shadow: 0 1px 0 var(--teal-muted);
-				flex-shrink: 0;
-			}
-			.logo-row {
-				display: flex;
-				align-items: center;
-				gap: 10px;
-			}
-			.logo-icon {
-				width: 32px;
-				height: 32px;
-				background: linear-gradient(135deg, var(--accent) 0%, var(--primary) 100%);
-				border-radius: 8px;
-				display: flex;
-				align-items: center;
-				justify-content: center;
-				font-size: 18px;
-				color: #fff;
-			}
-			.logo-wordmark {
-				font-weight: 700;
-				font-size: 1.25rem;
-				color: var(--primary);
-				letter-spacing: -0.02em;
-			}
-			.topbar-actions {
-				display: flex;
-				gap: 8px;
-			}
-			.topbar-actions button {
-				padding: 6px 14px;
-				border: 1px solid var(--teal);
-				background: transparent;
-				color: var(--teal);
-				border-radius: 999px;
-				font-size: 0.875rem;
-				cursor: pointer;
-			}
-			.topbar-actions button:hover {
-				background: var(--accent);
-				border-color: var(--accent);
-				color: #fff;
-			}
-
 			/* Header / breadcrumb */
 			.page-header {
 				padding: 24px 24px 16px;
@@ -95,12 +43,23 @@
 				margin: 0 auto;
 				width: 100%;
 			}
+			.brand-heading {
+				display: flex;
+				align-items: center;
+				gap: 12px;
+			}
+			.brand-logo {
+				height: 44px;
+				width: auto;
+				display: block;
+			}
 			.page-header h1 {
 				font-size: 1.5rem;
 				color: var(--primary);
 				font-weight: 700;
 				font-family: "Quicksand", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 				letter-spacing: -0.02em;
+				margin: 0;
 			}
 			.brand-travel {
 				color: var(--primary);
@@ -172,12 +131,16 @@
 				box-shadow: 0 1px 4px rgba(84, 134, 135, 0.08);
 			}
 			.assistant-message .avatar {
-				width: 32px;
-				height: 32px;
+				width: 36px;
+				height: 36px;
 				border-radius: 50%;
-				background: #fff url("/travellite-hawk.png") center/cover no-repeat;
-				box-shadow: 0 0 0 2px rgba(250, 121, 15, 0.35);
+				background: url("/travellite-hawk-icon.png") center/contain no-repeat;
+				background-color: transparent;
 				flex-shrink: 0;
+				border: none;
+				outline: none;
+				box-shadow: none;
+				overflow: hidden;
 			}
 			.user-message {
 				align-self: flex-end;
@@ -297,25 +260,17 @@
 			@media (max-width: 640px) {
 				.page-header { padding: 16px 16px 12px; }
 				.chat-wrapper { padding: 0 16px 16px; }
-				.topbar { padding: 10px 16px; }
 				.message { max-width: 92%; }
 			}
 		</style>
 		<script src="https://cdn.jsdelivr.net/npm/@cloudflare/realtimekit@1.2.4/dist/browser.js"></script>
 	</head>
 	<body>
-		<header class="topbar">
-			<div class="logo-row">
-				<img
-					src="/travellite-logo-full.png"
-					alt="travellite"
-					style="height: 32px"
-				/>
-			</div>
-		</header>
-
 		<div class="page-header" id="page-header">
-			<h1><span class="brand-travel">travel</span><span class="brand-lite">lite</span></h1>
+			<div class="brand-heading">
+				<img src="/travellite-hawk-logo.png" alt="" class="brand-logo" aria-hidden="true" />
+				<h1><span class="brand-travel">travel</span><span class="brand-lite">lite</span></h1>
+			</div>
 			<p class="subtitle">Plan trips, flights, hotels & activities</p>
 			<p id="realtime-status">Connecting…</p>
 		</div>
@@ -400,7 +355,7 @@
 						const step = err.step || '';
 						const details = err.details != null ? (typeof err.details === 'string' ? err.details : JSON.stringify(err.details)) : err.message || res.statusText;
 						if (res.status === 503) {
-							statusEl.textContent = 'Send-only mode: responses still stream to the UI.';
+							statusEl.textContent = 'Two-way: response stream to UI and UI streams back.';
 						} else {
 							statusEl.textContent = 'Token error (' + (step || res.status) + '): ' + (details.substring(0, 120) + (details.length > 120 ? '…' : ''));
 						}
@@ -411,7 +366,7 @@
 					roomId = meetingId || roomId;
 					sessionStorage.setItem('travel-agent-room', roomId);
 					if (typeof RealtimeKit === 'undefined') {
-						statusEl.textContent = 'Send-only: responses stream to the UI.';
+						statusEl.textContent = 'Two-way: response stream to UI and UI streams back.';
 						return;
 					}
 					meeting = await RealtimeKit.init({
@@ -419,7 +374,7 @@
 						defaults: { audio: false, video: false }
 					});
 					await meeting.join();
-					statusEl.textContent = 'Connected. Messages and responses stream here.';
+					statusEl.textContent = 'Two-way: response stream to UI and UI streams back.';
 					if (meeting.chat && meeting.chat.messages) {
 						const checkMessages = () => {
 							const messages = meeting.chat.messages || [];
@@ -439,7 +394,7 @@
 						setInterval(checkMessages, 300);
 					}
 				} catch (e) {
-					statusEl.textContent = 'Send-only: responses stream to the UI.';
+					statusEl.textContent = 'Two-way: response stream to UI and UI streams back.';
 				}
 			}
 
