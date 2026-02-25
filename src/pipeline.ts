@@ -58,6 +58,7 @@ export async function performRAG(
 	destination?: string,
 ): Promise<string> {
 	try {
+		console.log("[Pipeline RAG] Querying Vectorize, destination:", destination ?? "any");
 		const queryEmbedding = await generateEmbedding(env, query);
 		const filter: Record<string, string> = {};
 		if (destination) filter.city = destination;
@@ -65,6 +66,8 @@ export async function performRAG(
 			topK: 5,
 			filter: Object.keys(filter).length > 0 ? filter : undefined,
 		});
+		const matchCount = queryResult?.matches?.length ?? 0;
+		console.log("[Pipeline RAG] Vectorize matches:", matchCount);
 		if (!queryResult?.matches?.length) return "";
 		const contextParagraphs = queryResult.matches
 			.map((match: { metadata?: Record<string, unknown>; score?: number }, i: number) => {
@@ -338,6 +341,7 @@ async function ingestAmadeusResult(
 
 async function useTools(env: Env, message: string, tripState: PipelineTripState): Promise<string> {
 	try {
+		console.log("[Pipeline Tools] Determining Amadeus API call for message");
 		const client = new AmadeusClient({
 			AMADEUS_API_KEY: env.AMADEUS_API_KEY,
 			AMADEUS_API_SECRET: env.AMADEUS_API_SECRET,
@@ -357,7 +361,11 @@ async function useTools(env: Env, message: string, tripState: PipelineTripState)
 				return "";
 			}
 		}
-		if (!apiCall?.apiName) return "";
+		if (!apiCall?.apiName) {
+			console.log("[Pipeline Tools] No API call determined, skipping");
+			return "";
+		}
+		console.log("[Pipeline Tools] Calling Amadeus API:", apiCall.apiName);
 		const result = await callAmadeusAPI(client, apiCall.apiName, apiCall.params as Record<string, unknown>);
 		const toolResults: string[] = [];
 		if (result.success && result.data) {
@@ -381,9 +389,10 @@ async function useTools(env: Env, message: string, tripState: PipelineTripState)
 		} else {
 			toolResults.push(`API call error (${apiCall.apiName}): ${result.error ?? "Failed"}`);
 		}
+		console.log("[Pipeline Tools] Amadeus result:", result.success ? "success" : "error", "| summary length:", toolResults.join("; ").length);
 		return toolResults.length > 0 ? `[Tool Results: ${toolResults.join("; ")}]` : "";
 	} catch (e) {
-		console.error("Pipeline useTools error:", e);
+		console.error("[Pipeline Tools] useTools error:", e);
 		return `[Tool Error: ${e instanceof Error ? e.message : "Unknown error"}]`;
 	}
 }
@@ -413,6 +422,7 @@ Provide helpful, personalized travel advice based on the user's query and the in
 		{ role: "system" as const, content: systemPrompt },
 		{ role: "user" as const, content: userMessage },
 	];
+	console.log("[Pipeline LLM] Calling Workers AI (stream: true)");
 	const aiResponse = await env.AI.run(LLM_MODEL, { messages, max_tokens: 1024, stream: true });
 	if (!aiResponse) throw new Error("AI.run returned null");
 	if (!(aiResponse instanceof ReadableStream)) throw new Error(`AI.run did not return ReadableStream, got: ${typeof aiResponse}`);
@@ -430,6 +440,7 @@ export async function runPipeline(
 ): Promise<ReadableStream> {
 	const needsRAG = shouldUseRAG(message);
 	const needsTools = shouldUseTools(message);
+	console.log("[Pipeline] message:", message.slice(0, 60) + (message.length > 60 ? "…" : ""), "| RAG:", needsRAG, "| Tools:", needsTools);
 	const ragPromise = needsRAG
 		? Promise.race([
 				performRAG(env, message, tripState.basics?.destination),
@@ -443,6 +454,7 @@ export async function runPipeline(
 			])
 		: Promise.resolve("");
 	const [ragResult, toolsResult] = await Promise.all([ragPromise, toolsPromise]);
+	console.log("[Pipeline] RAG result length:", ragResult?.length ?? 0, "| Tools result length:", toolsResult?.length ?? 0);
 	return generateLLMResponse(env, message, ragResult, toolsResult, tripState);
 }
 

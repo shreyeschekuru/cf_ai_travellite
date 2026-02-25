@@ -156,7 +156,7 @@
 					roomId = meetingId || roomId;
 					sessionStorage.setItem('travel-agent-room', roomId);
 					if (typeof RealtimeKit === 'undefined') {
-						statusEl.textContent = 'RealtimeKit script not loaded. Using send-only mode; roomId=' + roomId;
+						statusEl.textContent = 'RealtimeKit not loaded. Send-only mode: responses will still stream to the UI.';
 						return;
 					}
 					meeting = await RealtimeKit.init({
@@ -184,7 +184,7 @@
 						setInterval(checkMessages, 300);
 					}
 				} catch (e) {
-					statusEl.textContent = 'Realtime init failed: ' + (e.message || 'Unknown error') + '. Using send-only; roomId=' + roomId;
+					statusEl.textContent = 'Realtime init failed: ' + (e.message || 'Unknown error') + '. Send-only: responses will still stream to the UI.';
 				}
 			}
 
@@ -211,14 +211,47 @@
 						await meeting.chat.sendTextMessage(message);
 						assistantP.textContent = 'Streaming… (responses appear here from Realtime)';
 					} else {
-						const res = await fetch('/api/realtime/send', {
+						// Send-only: no Realtime room joined. Still show response by streaming from Worker.
+						const streamRes = await fetch('/api/agents/TravelAgent/stream', {
 							method: 'POST',
 							headers: { 'Content-Type': 'application/json' },
-							body: JSON.stringify({ roomId, userId, text: message }),
+							body: JSON.stringify({ message }),
 						});
-						const data = await res.json().catch(() => ({}));
-						if (!res.ok) throw new Error(data.message || data.error || 'Send failed');
-						assistantP.textContent = 'Message sent. Response is streaming to Realtime room "' + roomId + '". Connect with the same room in Realtime to see it live.';
+						if (!streamRes.ok) {
+							const errData = await streamRes.json().catch(() => ({}));
+							throw new Error(errData.message || errData.error || 'Stream failed');
+						}
+						if (!streamRes.body) throw new Error('No response body');
+						const reader = streamRes.body.getReader();
+						const decoder = new TextDecoder();
+						let buffer = '';
+						let text = '';
+						while (true) {
+							const { done, value } = await reader.read();
+							if (value) buffer += decoder.decode(value, { stream: true });
+							for (;;) {
+								const i = buffer.indexOf('\n\n');
+								if (i === -1) break;
+								const block = buffer.slice(0, i);
+								buffer = buffer.slice(i + 2);
+								const line = block.split('\n').find(l => l.startsWith('data:'));
+								if (line) {
+									const data = line.slice(5).trim();
+									if (data === '[DONE]') continue;
+									try {
+										const j = JSON.parse(data);
+										const content = j.response || j.choices?.[0]?.delta?.content || j.content;
+										if (typeof content === 'string' && content) {
+											text += content;
+											assistantP.textContent = text;
+											chatMessages.scrollTop = chatMessages.scrollHeight;
+										}
+									} catch (_) {}
+								}
+							}
+							if (done) break;
+						}
+						if (!text) assistantP.textContent = 'No response generated.';
 					}
 				} catch (err) {
 					assistantP.textContent = 'Error: ' + (err.message || 'Something went wrong');

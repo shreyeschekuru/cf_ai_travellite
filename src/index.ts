@@ -258,26 +258,33 @@ async function handleRealtimeSend(request: Request, env: Env): Promise<Response>
 
 /**
  * GET /api/realtime/token — return Realtime participant auth token and meeting/room id for the frontend.
- * Requires REALTIME_ACCOUNT_ID, REALTIME_APP_ID, CLOUDFLARE_API_TOKEN.
- * Optional: REALTIME_PRESET_NAME or query ?preset=name (e.g. group-call-host, webinar-participant).
- * If not set, we try to list presets and use the first one.
+ * Implements Realtime Kit flow: Create Meeting → Add Participant (with preset) → return auth token.
+ * Docs: https://developers.cloudflare.com/realtime/realtimekit/concepts/meeting/
+ *       https://developers.cloudflare.com/realtime/realtimekit/concepts/participant/
+ * Required: REALTIME_ACCOUNT_ID, REALTIME_APP_ID, CLOUDFLARE_API_TOKEN (with Realtime permissions).
+ * Optional: REALTIME_PRESET_NAME_PARTICIPANT (preset name for UI user; must exist in your App).
  */
 async function handleRealtimeToken(request: Request, env: Env): Promise<Response> {
 	const accountId = env.REALTIME_ACCOUNT_ID;
 	const appId = env.REALTIME_APP_ID;
 	const token = env.REALTIME_API_TOKEN || env.CLOUDFLARE_API_TOKEN;
+	const presetNameParticipant = (env as { REALTIME_PRESET_NAME_PARTICIPANT?: string }).REALTIME_PRESET_NAME_PARTICIPANT;
 	if (!accountId || !appId || !token) {
 		return Response.json(
-			{ error: "Realtime token not configured", need: ["REALTIME_ACCOUNT_ID", "REALTIME_APP_ID", "CLOUDFLARE_API_TOKEN"] },
+			{
+				error: "Realtime token not configured",
+				need: ["REALTIME_ACCOUNT_ID", "REALTIME_APP_ID", "CLOUDFLARE_API_TOKEN"],
+				docs: "https://developers.cloudflare.com/realtime/realtimekit/concepts/meeting/",
+			},
 			{ status: 503 },
 		);
 	}
 	try {
-		// Preset name: env > query param > list presets (first) > fallbacks
+		// Resolve preset for UI participant: preset_id (preferred) > preset_name > list presets > fallbacks
 		const urlPreset = new URL(request.url).searchParams.get("preset")?.trim();
 		let presetName: string | undefined =
 			(env as { REALTIME_PRESET_NAME?: string }).REALTIME_PRESET_NAME ?? (urlPreset ? urlPreset : undefined);
-		if (!presetName) {
+		if (!presetName && !presetNameParticipant) {
 			const presetsUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/realtime/kit/${appId}/presets`;
 			const presetsRes = await fetch(presetsUrl, {
 				headers: { "Authorization": `Bearer ${token}` },
@@ -286,19 +293,43 @@ async function handleRealtimeToken(request: Request, env: Env): Promise<Response
 			if (presetsRes.ok) {
 				const presetsData = (() => {
 					try {
-						return JSON.parse(presetsBody) as { result?: Array<{ name?: string }>; data?: Array<{ name?: string }> };
+						return JSON.parse(presetsBody) as {
+							result?: Array<{ name?: string }> | { presets?: Array<{ name?: string }> };
+							data?: Array<{ name?: string }> | { presets?: Array<{ name?: string }> };
+						};
 					} catch {
 						return {};
 					}
 				})();
-				const list = presetsData.result ?? presetsData.data ?? [];
-				const first = Array.isArray(list) ? list[0] : undefined;
+				const rawResult = presetsData.result;
+				const rawData = presetsData.data;
+				const list: Array<{ name?: string }> = Array.isArray(rawResult)
+					? rawResult
+					: Array.isArray(rawData)
+						? rawData
+						: (rawResult && typeof rawResult === "object" && "presets" in rawResult && Array.isArray((rawResult as { presets?: unknown }).presets)
+							? (rawResult as { presets: Array<{ name?: string }> }).presets
+							: rawData && typeof rawData === "object" && "presets" in rawData && Array.isArray((rawData as { presets?: unknown }).presets)
+								? (rawData as { presets: Array<{ name?: string }> }).presets
+								: []);
+				const first = list[0];
 				if (first && typeof first === "object" && first.name) {
 					presetName = first.name;
 				}
 			}
 		}
-		presetName = presetName || "group-call-host";
+		// API uses preset_name; try participant preset name first when set
+		const presetFallbacks = [
+			presetNameParticipant,
+			presetName,
+			"group_call_participant",
+			"group_call_host",
+			"group-call-participant",
+			"group-call-host",
+			"webinar-participant",
+			"webinar-host",
+		].filter(Boolean) as string[];
+		const presetNamesToTry = [...new Set(presetFallbacks)];
 
 		const createUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/realtime/kit/${appId}/meetings`;
 		const createRes = await fetch(createUrl, {
@@ -344,35 +375,52 @@ async function handleRealtimeToken(request: Request, env: Env): Promise<Response
 				{ status: 502 },
 			);
 		}
+
 		const partUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/realtime/kit/${appId}/meetings/${meetingId}/participants`;
-		const partRes = await fetch(partUrl, {
-			method: "POST",
-			headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-			body: JSON.stringify({
-				name: "User",
-				preset_name: presetName,
-				custom_participant_id: "web-" + Date.now(),
-			}),
-		});
-		const partBody = await partRes.text();
-		if (!partRes.ok) {
-			console.error("[RealtimeToken] Add participant failed:", partRes.status, partBody);
-			let details: unknown = partBody;
-			try {
-				details = JSON.parse(partBody);
-			} catch {
-				// keep as string
-			}
+		const customParticipantId = "web-" + Date.now();
+		let partBody = "";
+		let partRes: Response | null = null;
+		let lastPartDetails: unknown = null;
+
+		// Add Participant API accepts preset_name only (not preset_id). Docs: https://developers.cloudflare.com/realtime/realtimekit/concepts/participant/
+		for (const tryPreset of presetNamesToTry) {
+				partRes = await fetch(partUrl, {
+					method: "POST",
+					headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+					body: JSON.stringify({
+						name: "User",
+						preset_name: tryPreset,
+						custom_participant_id: customParticipantId,
+					}),
+				});
+				partBody = await partRes.text();
+				if (partRes.ok) break;
+				lastPartDetails = partBody;
+				try {
+					lastPartDetails = JSON.parse(partBody);
+				} catch {
+					// keep as string
+				}
+				const isPresetNotFound =
+					partRes.status === 404 &&
+					(partBody.includes("preset") || (typeof lastPartDetails === "object" && lastPartDetails !== null && "error" in (lastPartDetails as object)));
+				if (!isPresetNotFound) break;
+				console.warn("[RealtimeToken] Preset not found, trying next:", tryPreset, partBody.slice(0, 150));
+		}
+
+		if (!partRes || !partRes.ok) {
+			console.error("[RealtimeToken] Add participant failed:", partRes?.status, partBody);
 			return Response.json(
-				{ error: "Failed to add participant", step: "add_participant", status: partRes.status, details },
+				{ error: "Failed to add participant", step: "add_participant", status: partRes?.status ?? 500, details: lastPartDetails ?? partBody },
 				{ status: 502 },
 			);
 		}
+
 		const partData = (() => {
 			try {
 				return JSON.parse(partBody) as {
-					result?: { auth_token?: string; authToken?: string; [k: string]: unknown };
-					data?: { auth_token?: string; authToken?: string; [k: string]: unknown };
+					result?: { auth_token?: string; authToken?: string; token?: string; [k: string]: unknown };
+					data?: { auth_token?: string; authToken?: string; token?: string; [k: string]: unknown };
 					success?: boolean;
 				};
 			} catch {
@@ -382,8 +430,10 @@ async function handleRealtimeToken(request: Request, env: Env): Promise<Response
 		const authToken =
 			partData.result?.auth_token ??
 			partData.result?.authToken ??
+			partData.result?.token ??
 			partData.data?.auth_token ??
-			partData.data?.authToken;
+			partData.data?.authToken ??
+			partData.data?.token;
 		if (!authToken) {
 			return Response.json(
 				{ error: "No auth_token in response", step: "add_participant", details: partData },
