@@ -10,7 +10,7 @@
 import { Env, ChatMessage, RealtimeWebhookEvent, RealtimeAgentResponse } from "./types";
 import { TravelAgent } from "./travel-agent";
 import { RealtimeConnector } from "./realtime-connector";
-import { runPipeline, parseSSEChunk } from "./pipeline";
+import { runPipeline, parseSSEChunk, detectIntent } from "./pipeline";
 
 // Export Durable Objects for discovery
 export { TravelAgent };
@@ -223,7 +223,7 @@ async function handleTravelAgentStream(request: Request, env: Env): Promise<Resp
 		}
 
 		// Load session state from TravelAgent DO
-		let tripState: { basics?: Record<string, unknown>; preferences?: string[]; recentMessages?: Array<{ role: "user" | "assistant"; content: string }> } = {};
+		let tripState: { basics?: Record<string, unknown>; preferences?: string[]; recentMessages?: Array<{ role: "user" | "assistant"; content: string }>; currentIntent?: string | null } = {};
 		try {
 			const rpcRequest = new Request(new URL(`/agents/TravelAgent/${sessionId}/rpc`, request.url).toString(), {
 				method: "POST",
@@ -238,6 +238,10 @@ async function handleTravelAgentStream(request: Request, env: Env): Promise<Resp
 		} catch (e) {
 			console.warn("[TravelAgent stream] getState failed, using empty state:", e);
 		}
+
+		// State Object: detect intent so subsequent messages are treated as part of this flow until changed or global intent
+		const newIntent = await detectIntent(env, message, tripState.currentIntent ?? null);
+		tripState.currentIntent = newIntent;
 
 		const stream = await runPipeline(env, message, tripState);
 		const [clientStream, accStream] = stream.tee();
@@ -254,7 +258,7 @@ async function handleTravelAgentStream(request: Request, env: Env): Promise<Resp
 						type: "rpc",
 						id: "append-" + Date.now(),
 						method: "appendConversation",
-						args: [message, accumulated],
+						args: [message, accumulated, { currentIntent: tripState.currentIntent }],
 					}),
 				});
 				await routeTravelAgentRequest(appendRequest, env);

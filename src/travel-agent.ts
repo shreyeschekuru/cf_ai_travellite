@@ -1,7 +1,7 @@
 import { Agent, callable } from "agents";
 import { Env } from "./types";
 import { AmadeusClient } from "./amadeus-client";
-import { runPipeline, type PipelineTripState } from "./pipeline";
+import { runPipeline, detectIntent, type PipelineTripState } from "./pipeline";
 
 /**
  * Basic trip information
@@ -41,6 +41,11 @@ export interface TravelState {
 		role: "user" | "assistant";
 		content: string;
 	}>;
+
+	/**
+	 * Current conversation intent (State Object). All subsequent messages are treated as part of this flow until a global intent or explicit change.
+	 */
+	currentIntent?: string | null;
 }
 
 /**
@@ -55,6 +60,7 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		preferences: [],
 		currentItinerary: null,
 		recentMessages: [],
+		currentIntent: null,
 	};
 
 	/**
@@ -818,23 +824,32 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	private static readonly MAX_RECENT_MESSAGES = 20;
 
 	@callable({ description: "Return current trip state and conversation history for session memory" })
-	getState(): { basics: TripBasics; preferences: string[]; recentMessages: TravelState["recentMessages"] } {
+	getState(): { basics: TripBasics; preferences: string[]; recentMessages: TravelState["recentMessages"]; currentIntent: string | null } {
 		return {
 			basics: this.state.basics,
 			preferences: [...this.state.preferences],
 			recentMessages: this.state.recentMessages.slice(-TravelAgent.MAX_RECENT_MESSAGES),
+			currentIntent: this.state.currentIntent ?? null,
 		};
 	}
 
 	@callable({ description: "Append user and assistant messages to conversation history and persist" })
-	async appendConversation(userMessage: string, assistantMessage: string): Promise<{ success: boolean }> {
+	async appendConversation(
+		userMessage: string,
+		assistantMessage: string,
+		stateUpdate?: { currentIntent?: string | null },
+	): Promise<{ success: boolean }> {
 		this.extractTripInfo(userMessage);
 		const next = [
 			...this.state.recentMessages,
 			{ role: "user" as const, content: userMessage },
 			{ role: "assistant" as const, content: assistantMessage },
 		].slice(-TravelAgent.MAX_RECENT_MESSAGES);
-		this.setState({ ...this.state, recentMessages: next });
+		const nextState = { ...this.state, recentMessages: next };
+		if (stateUpdate && "currentIntent" in stateUpdate) {
+			nextState.currentIntent = stateUpdate.currentIntent ?? null;
+		}
+		this.setState(nextState);
 		return { success: true };
 	}
 
@@ -855,20 +870,23 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	): Promise<{ success: boolean; message?: string; error?: string }> {
 		console.log("[TravelAgent] handleMessageStreaming: Starting");
 
-		// Persist user message and build trip state with history for context
+		// State Object: detect intent and update currentIntent before running pipeline
+		const newIntent = await detectIntent(this.env as Env, input, this.state.currentIntent ?? null);
+		this.extractTripInfo(input);
 		this.setState({
 			...this.state,
+			currentIntent: newIntent,
 			recentMessages: [
 				...this.state.recentMessages,
 				{ role: "user" as const, content: input },
 			].slice(-TravelAgent.MAX_RECENT_MESSAGES),
 		});
-		this.extractTripInfo(input);
 
 		const tripState: PipelineTripState = {
 			basics: this.state.basics,
 			preferences: this.state.preferences,
 			recentMessages: this.state.recentMessages,
+			currentIntent: this.state.currentIntent ?? null,
 		};
 
 		// Run pipeline with history, stream to Realtime, and persist assistant response when done
@@ -1014,23 +1032,24 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		const handleMessageStartTime = Date.now();
 		console.error(`[handleMessage] Starting handleMessage() at ${new Date().toISOString()}`);
 
-		// 1. Update state with user message
+		// 1. State Object: detect intent and update state with user message
+		const newIntent = await detectIntent(this.env as Env, input, this.state.currentIntent ?? null);
+		this.extractTripInfo(input);
 		this.setState({
 			...this.state,
+			currentIntent: newIntent,
 			recentMessages: [
 				...this.state.recentMessages,
 				{ role: "user" as const, content: input },
-			],
+			].slice(-TravelAgent.MAX_RECENT_MESSAGES),
 		});
 
-		// 2. Extract and update trip basics from message
-		this.extractTripInfo(input);
-
-		// 3. Run shared pipeline with conversation history for context
+		// 2. Run shared pipeline with conversation history and current intent
 		const tripState: PipelineTripState = {
 			basics: this.state.basics,
 			preferences: this.state.preferences,
 			recentMessages: this.state.recentMessages,
+			currentIntent: this.state.currentIntent ?? null,
 		};
 
 		let stream: ReadableStream;

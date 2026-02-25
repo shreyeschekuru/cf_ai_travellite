@@ -122,17 +122,98 @@ function resolveApiParamsAndCheckMissing(
 	return { ok: true, params: resolved };
 }
 
+/** Flow intents: once set, subsequent messages are treated as part of this flow until changed or a global intent. */
+export const FLOW_INTENTS = [
+	"Plan_Trip",
+	"Search_Flights",
+	"Search_Hotels",
+	"Search_Activities",
+	"Get_Recommendations",
+	"Open_New_Account",
+	"Book_Flight",
+	"Book_Hotel",
+	"Multi_City",
+] as const;
+
+/** Global intents: clear the current flow and optionally start a new one or cancel. */
+export const GLOBAL_INTENTS = ["Cancel", "Start_Over", "New_Search", "Help", "General"] as const;
+
+export type FlowIntent = (typeof FLOW_INTENTS)[number];
+export type GlobalIntent = (typeof GLOBAL_INTENTS)[number];
+
 export interface PipelineTripState {
 	basics?: { origin?: string; destination?: string; startDate?: string; endDate?: string; budget?: number };
 	preferences?: string[];
 	/** Last N messages for LLM context (user/assistant). Capped when stored. */
 	recentMessages?: Array<{ role: "user" | "assistant"; content: string }>;
+	/** Current conversation intent (State Object). All subsequent prompts are treated as part of this flow until a global intent or explicit change. */
+	currentIntent?: string | null;
 }
 
 const defaultTripState: PipelineTripState = {
 	basics: {},
 	preferences: [],
 };
+
+/**
+ * Detect conversation intent from the user message. Returns the new currentIntent for the State Object.
+ * - Global intents (Cancel, Start_Over, New_Search, Help) → return null (clear state).
+ * - New flow intent expressed by user → return that intent.
+ * - Otherwise (user continuing current flow, e.g. answering a question) → return currentIntent unchanged.
+ */
+export async function detectIntent(
+	env: Env,
+	message: string,
+	currentIntent: string | null,
+): Promise<string | null> {
+	try {
+		const flowList = FLOW_INTENTS.join(", ");
+		const globalList = GLOBAL_INTENTS.join(", ");
+		const prompt = `You are a conversation intent classifier for a travel assistant.
+
+User message: "${message}"
+Current conversation intent (State): ${currentIntent ?? "null"}
+
+Classify the user's intent. Respond with ONLY a JSON object:
+{ "intent": "<IntentName>" | null, "isGlobal": boolean }
+
+- Flow intents (user starting or continuing a specific task): ${flowList}
+- Global intents (user wants to cancel, start over, get help, or general chat): ${globalList}
+
+Rules:
+- If the user explicitly expresses a NEW flow (e.g. "I want to open an account", "find flights", "plan a trip to Austin"), set intent to that flow name and isGlobal false.
+- If the user says cancel, stop, never mind, start over, new search, or help, set intent to that global name and isGlobal true.
+- If the user is clearly continuing the current flow (answering a question, adding details, saying "yes" or "from Dallas"), set intent to null and isGlobal false (state stays unchanged).
+- If current intent is set and the message is ambiguous, prefer continuing the current flow (intent null, isGlobal false).`;
+
+		const response = await env.AI.run(LLM_MODEL, {
+			messages: [
+				{ role: "system", content: "You are an intent classifier. Respond with only valid JSON: { intent: string | null, isGlobal: boolean }." },
+				{ role: "user", content: prompt },
+			],
+			max_tokens: 80,
+		});
+		let text = "";
+		if (typeof response === "string") text = response;
+		else if (response && typeof response === "object" && "response" in response) text = String((response as { response: unknown }).response);
+		else text = JSON.stringify(response);
+		const jsonMatch = text.match(/\{[\s\S]*\}/);
+		if (!jsonMatch) return currentIntent;
+		const parsed = JSON.parse(jsonMatch[0]) as { intent?: string | null; isGlobal?: boolean };
+		if (parsed.isGlobal === true || GLOBAL_INTENTS.includes((parsed.intent ?? "") as GlobalIntent)) {
+			console.log("[Pipeline State] Global intent detected:", parsed.intent, "— clearing currentIntent");
+			return null;
+		}
+		if (parsed.intent && typeof parsed.intent === "string" && parsed.intent.trim() !== "") {
+			console.log("[Pipeline State] New flow intent:", parsed.intent, "(previous:", currentIntent ?? "null", ")");
+			return parsed.intent.trim();
+		}
+		return currentIntent;
+	} catch (e) {
+		console.error("[Pipeline] detectIntent error:", e);
+		return currentIntent;
+	}
+}
 
 function shouldUseRAG(message: string): boolean {
 	const lower = message.toLowerCase();
@@ -605,7 +686,12 @@ async function generateLLMResponse(
 		summaryText = await summarizeHistory(env, older);
 	}
 
+	const currentIntent = tripState.currentIntent ?? null;
 	const systemPrompt = `You are a helpful travel assistant. You help users plan trips, find flights, and discover destinations.
+
+Current conversation state (State Object):
+- Active intent: ${currentIntent ?? "none"}
+${currentIntent ? `Treat every subsequent user message as part of this flow ("${currentIntent}") until the user explicitly changes topic, says cancel/start over, or triggers a global intent. Do not treat their reply as a new unrelated request.` : ""}
 
 Current trip information:
 - Destination: ${basics.destination ?? "Not specified"}
