@@ -771,6 +771,7 @@ export async function runPipeline(
 	message: string,
 	tripState: PipelineTripState = defaultTripState,
 ): Promise<ReadableStream> {
+	console.log("[Pipeline] runPipeline start");
 	const needsRAG = shouldUseRAG(message);
 	const needsTools = shouldUseTools(message);
 	console.log("[Pipeline] message:", message.slice(0, 60) + (message.length > 60 ? "…" : ""), "| RAG:", needsRAG, "| Tools:", needsTools);
@@ -788,7 +789,10 @@ export async function runPipeline(
 		: Promise.resolve("");
 	const [ragResult, toolsResult] = await Promise.all([ragPromise, toolsPromise]);
 	console.log("[Pipeline] RAG result length:", ragResult?.length ?? 0, "| Tools result length:", toolsResult?.length ?? 0, "| History:", tripState.recentMessages?.length ?? 0);
-	return generateLLMResponse(env, message, ragResult, toolsResult, tripState);
+	console.log("[Pipeline] calling generateLLMResponse (stream: true)");
+	const stream = await generateLLMResponse(env, message, ragResult, toolsResult, tripState);
+	console.log("[Pipeline] runPipeline done, returning stream");
+	return stream;
 }
 
 /**

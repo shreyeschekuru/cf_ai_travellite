@@ -50,9 +50,19 @@ export interface TravelState {
 	/** Active trip thread id (each trip is one thread). New trip = new id, previous trip stored in SQL and listed in trips. */
 	currentTripId?: string | null;
 
-	/** Sidebar list: past and current trips for display (id, title, createdAt). Full thread data is in SQL. */
+	/** Sidebar list: past and current trips for display (id, title, createdAt). Full thread data in DO storage. */
 	trips?: Array<{ id: string; title: string; createdAt: string }>;
 }
+
+/** Stored thread snapshot in DO storage (key: `thread:${id}`) */
+type StoredThread = {
+	title: string;
+	createdAt: string;
+	messages: TravelState["recentMessages"];
+	basics: TripBasics;
+	preferences: string[];
+	currentIntent: string | null;
+};
 
 /**
  * Travel Agent class that extends Agent for travel-related tasks
@@ -76,6 +86,15 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	 */
 	private _amadeusClient: AmadeusClient | null = null;
 
+	/** Whether we've loaded thread list and current thread from DO storage (avoids re-loading every request). */
+	private _storageLoaded = false;
+
+	/** Durable Object key-value storage (AgentContext = DurableObjectState). */
+	private get doStorage(): DurableObjectStorage {
+		const ctx = (this as unknown as { ctx: { storage: DurableObjectStorage } }).ctx;
+		return ctx.storage;
+	}
+
 	/**
 	 * Get or create Amadeus client instance
 	 */
@@ -94,25 +113,45 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	 * Called when the agent is first created or restarted
 	 */
 	async onStart() {
-		await this.ensureTripTable();
+		await this.ensureStateLoaded();
 	}
 
-	/** Create trip_threads table if not exists (SQLite per Agent instance). */
-	private async ensureTripTable(): Promise<void> {
+	/** Load current thread and threads list from DO storage on first access. */
+	private async ensureStateLoaded(): Promise<void> {
+		if (this._storageLoaded) return;
 		try {
-			const sql = (this as any).sql as undefined | ((strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown[]>);
-			if (!sql) return;
-			await sql`CREATE TABLE IF NOT EXISTS trip_threads (
-				id TEXT PRIMARY KEY,
-				title TEXT NOT NULL,
-				created_at INTEGER NOT NULL,
-				basics TEXT,
-				preferences TEXT,
-				messages TEXT,
-				current_intent TEXT
-			)`;
+			const currentThreadId = await this.doStorage.get<string>("currentThreadId");
+			if (currentThreadId) {
+				const stored = await this.doStorage.get<StoredThread>(`thread:${currentThreadId}`);
+				if (stored) {
+					this.setState({
+						...this.state,
+						currentTripId: currentThreadId,
+						recentMessages: stored.messages ?? [],
+						basics: stored.basics ?? {},
+						preferences: stored.preferences ?? [],
+						currentIntent: stored.currentIntent ?? null,
+					});
+					console.log("[TravelAgent] ensureStateLoaded: restored current thread", currentThreadId, "messages:", (stored.messages ?? []).length);
+				}
+			}
+			this._storageLoaded = true;
 		} catch (e) {
-			console.error("[TravelAgent] ensureTripTable error:", e);
+			console.error("[TravelAgent] ensureStateLoaded error:", e);
+			this._storageLoaded = true;
+		}
+	}
+
+	/** Load list of saved threads from DO storage (single source of truth for sidebar). */
+	private async getTripsListFromStorage(): Promise<Array<{ id: string; title: string; createdAt: string }>> {
+		await this.ensureStateLoaded();
+		try {
+			const list = (await this.doStorage.get<Array<{ id: string; title: string; createdAt: string }>>("threads")) ?? [];
+			console.log("[TravelAgent] getTripsListFromStorage: loaded", list.length, "saved thread(s)");
+			return list;
+		} catch (e) {
+			console.error("[TravelAgent] getTripsListFromStorage error:", e);
+			return [];
 		}
 	}
 
@@ -127,62 +166,97 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		return "New trip";
 	}
 
-	/** Persist current trip thread to SQL, add to trips list, then reset current thread state. */
-	private async saveCurrentTripAndStartNewAsync(): Promise<void> {
+	/** Persist current trip thread to DO storage, then reset current thread state. */
+	private async saveCurrentTripAndStartNew(): Promise<void> {
 		const id = this.state.currentTripId;
-		if (!id) return;
-		const sql = (this as any).sql as undefined | ((strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown[]>);
+		if (!id) {
+			console.log("[TravelAgent] saveCurrentTripAndStartNew: no currentTripId, skipping");
+			return;
+		}
 		const title = this.deriveTripTitle(this.state.basics, this.state.recentMessages);
-		const created_at = Date.now();
-		const basics = JSON.stringify(this.state.basics ?? {});
-		const preferences = JSON.stringify(this.state.preferences ?? []);
-		const messages = JSON.stringify(this.state.recentMessages ?? []);
-		const current_intent = this.state.currentIntent ?? "";
-		if (sql) {
-			try {
-				await sql`INSERT OR REPLACE INTO trip_threads (id, title, created_at, basics, preferences, messages, current_intent) VALUES (${id}, ${title}, ${created_at}, ${basics}, ${preferences}, ${messages}, ${current_intent})`;
-			} catch (e) {
-				console.error("[TravelAgent] saveCurrentTripAndStartNew insert error:", e);
-			}
+		const msgCount = (this.state.recentMessages ?? []).length;
+		console.log("[TravelAgent] saveCurrentTripAndStartNew: saving thread", id, "title:", title, "messages:", msgCount);
+		try {
+			const stored: StoredThread = {
+				title,
+				createdAt: new Date().toISOString(),
+				messages: this.state.recentMessages ?? [],
+				basics: this.state.basics ?? {},
+				preferences: this.state.preferences ?? [],
+				currentIntent: this.state.currentIntent ?? null,
+			};
+			await this.doStorage.put(`thread:${id}`, stored);
+			const threads = (await this.doStorage.get<Array<{ id: string; title: string; createdAt: string }>>("threads")) ?? [];
+			const existing = threads.findIndex((t) => t.id === id);
+			const entry = { id, title, createdAt: stored.createdAt };
+			const next = existing >= 0 ? threads.map((t, i) => (i === existing ? entry : t)) : [entry, ...threads];
+			await this.doStorage.put("threads", next);
+			console.log("[TravelAgent] saveCurrentTripAndStartNew: saved to DO storage, rotating to new thread");
+		} catch (e) {
+			console.error("[TravelAgent] saveCurrentTripAndStartNew error:", e);
+			return;
 		}
 		const newId = crypto.randomUUID();
-		const trips = [...(this.state.trips || []), { id, title, createdAt: new Date(created_at).toISOString() }];
 		this.setState({
 			...this.state,
 			currentTripId: newId,
-			trips,
 			recentMessages: [],
 			basics: {},
 			preferences: [],
 			currentIntent: null,
 		});
+		await this.doStorage.put("currentThreadId", newId);
+		console.log("[TravelAgent] saveCurrentTripAndStartNew: new currentTripId", newId);
 	}
 
-	/** Load a trip from SQL into current state (for sidebar switch). */
-	async loadTripFromSql(tripId: string): Promise<boolean> {
-		const sql = (this as any).sql as undefined | ((strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown[]>);
-		if (!sql) return false;
+	/** Load a trip from DO storage into current state (for sidebar switch). */
+	private async loadTripFromStorage(tripId: string): Promise<boolean> {
+		await this.ensureStateLoaded();
 		try {
-			const raw = await sql`SELECT id, title, created_at, basics, preferences, messages, current_intent FROM trip_threads WHERE id = ${tripId}`;
-			const rows = Array.isArray(raw) ? raw : [];
-			const row = rows[0] as undefined | { id: string; title: string; created_at: number; basics: string; preferences: string; messages: string; current_intent: string };
-			if (!row) return false;
-			const basics = (() => { try { return JSON.parse(row.basics || "{}"); } catch { return {}; } })();
-			const preferences = (() => { try { return JSON.parse(row.preferences || "[]"); } catch { return []; } })();
-			const recentMessages = (() => { try { return JSON.parse(row.messages || "[]"); } catch { return []; } })();
-			const currentIntent = row.current_intent || null;
+			const stored = await this.doStorage.get<StoredThread>(`thread:${tripId}`);
+			if (!stored) {
+				console.log("[TravelAgent] loadTripFromStorage: no data for tripId", tripId);
+				return false;
+			}
+			console.log("[TravelAgent] loadTripFromStorage: loading thread", tripId, "title:", stored.title, "messages:", (stored.messages ?? []).length);
 			this.setState({
 				...this.state,
 				currentTripId: tripId,
-				basics,
-				preferences,
-				recentMessages,
-				currentIntent,
+				basics: stored.basics ?? {},
+				preferences: stored.preferences ?? [],
+				recentMessages: stored.messages ?? [],
+				currentIntent: stored.currentIntent ?? null,
 			});
+			await this.doStorage.put("currentThreadId", tripId);
 			return true;
 		} catch (e) {
-			console.error("[TravelAgent] loadTripFromSql error:", e);
+			console.error("[TravelAgent] loadTripFromStorage error:", e);
 			return false;
+		}
+	}
+
+	/** Persist current thread to DO storage (call after appendConversation or when switching away). */
+	private async persistCurrentThread(): Promise<void> {
+		const id = this.state.currentTripId;
+		if (!id) return;
+		try {
+			const title = this.deriveTripTitle(this.state.basics, this.state.recentMessages);
+			const stored: StoredThread = {
+				title,
+				createdAt: new Date().toISOString(),
+				messages: this.state.recentMessages ?? [],
+				basics: this.state.basics ?? {},
+				preferences: this.state.preferences ?? [],
+				currentIntent: this.state.currentIntent ?? null,
+			};
+			await this.doStorage.put(`thread:${id}`, stored);
+			const threads = (await this.doStorage.get<Array<{ id: string; title: string; createdAt: string }>>("threads")) ?? [];
+			const existing = threads.findIndex((t) => t.id === id);
+			const entry = { id, title, createdAt: stored.createdAt };
+			const next = existing >= 0 ? threads.map((t, i) => (i === existing ? entry : t)) : [entry, ...threads];
+			await this.doStorage.put("threads", next);
+		} catch (e) {
+			console.error("[TravelAgent] persistCurrentThread error:", e);
 		}
 	}
 
@@ -278,6 +352,9 @@ export class TravelAgent extends Agent<Env, TravelState> {
 								break;
 							case "loadTrip":
 								method = this.loadTrip;
+								break;
+							case "startNewTrip":
+								method = this.startNewTrip;
 								break;
 							case "clearRecentMessages":
 								method = this.clearRecentMessages;
@@ -929,7 +1006,7 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	private static readonly MAX_RECENT_MESSAGES = 20;
 
 	@callable({ description: "Return current trip state and conversation history for session memory" })
-	getState(): {
+	async getState(): Promise<{
 		basics: TripBasics;
 		preferences: string[];
 		recentMessages: TravelState["recentMessages"];
@@ -937,15 +1014,24 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		currentTripId: string | null;
 		trips: Array<{ id: string; title: string; createdAt: string }>;
 		currentTripTitle: string;
-	} {
+	}> {
+		await this.ensureStateLoaded();
+		const savedTrips = await this.getTripsListFromStorage();
+		console.log("[TravelAgent] getState: currentTripId", this.state.currentTripId ?? "null", "recentMessages", (this.state.recentMessages ?? []).length, "savedTrips", savedTrips.length);
+		const currentId = this.state.currentTripId ?? null;
+		const currentTitle = this.deriveTripTitle(this.state.basics, this.state.recentMessages);
+		// Always include current thread in list (so "New trip" / blank chat appears in sidebar and can be selected)
+		const currentEntry = currentId ? { id: currentId, title: currentTitle, createdAt: new Date().toISOString() } : null;
+		const savedWithoutCurrent = currentId ? savedTrips.filter((t) => t.id !== currentId) : savedTrips;
+		const trips = currentEntry ? [currentEntry, ...savedWithoutCurrent] : savedWithoutCurrent;
 		return {
 			basics: this.state.basics,
 			preferences: [...this.state.preferences],
 			recentMessages: this.state.recentMessages.slice(-TravelAgent.MAX_RECENT_MESSAGES),
 			currentIntent: this.state.currentIntent ?? null,
-			currentTripId: this.state.currentTripId ?? null,
-			trips: [...(this.state.trips || [])],
-			currentTripTitle: this.deriveTripTitle(this.state.basics, this.state.recentMessages),
+			currentTripId: currentId,
+			trips,
+			currentTripTitle: currentTitle,
 		};
 	}
 
@@ -954,10 +1040,12 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	 * Used by the Worker stream path so the DO is the source of truth for trip switching and intent.
 	 */
 	@callable({ description: "Prepare turn: ensure trip id, classify intent and new trip, save/rotate if needed, set intent; return state" })
-	async prepareTurn(message: string): Promise<ReturnType<TravelAgent["getState"]>> {
-		await this.ensureTripTable();
+	async prepareTurn(message: string): Promise<Awaited<ReturnType<TravelAgent["getState"]>>> {
+		await this.ensureStateLoaded();
 		if (!this.state.currentTripId) {
-			this.setState({ ...this.state, currentTripId: crypto.randomUUID() });
+			const newId = crypto.randomUUID();
+			this.setState({ ...this.state, currentTripId: newId });
+			await this.doStorage.put("currentThreadId", newId);
 		}
 		const hasExisting = (this.state.recentMessages?.length ?? 0) > 0;
 		const currentBasics = { destination: this.state.basics?.destination, origin: this.state.basics?.origin };
@@ -968,19 +1056,36 @@ export class TravelAgent extends Agent<Env, TravelState> {
 			currentBasics,
 			hasExisting,
 		);
-		if (isNewTrip) await this.saveCurrentTripAndStartNewAsync();
+		console.log("[TravelAgent] prepareTurn: isNewTrip", isNewTrip, "intent", intent ?? "null", "hasExisting", hasExisting);
+		if (isNewTrip) await this.saveCurrentTripAndStartNew();
 		this.setState({ ...this.state, currentIntent: intent });
 		return this.getState();
 	}
 
 	@callable({ description: "Load a trip thread by id into current state (for sidebar switch)" })
 	async loadTrip(tripId: string): Promise<{ success: boolean }> {
-		const ok = await this.loadTripFromSql(tripId);
+		console.log("[TravelAgent] loadTrip: tripId", tripId);
+		const ok = await this.loadTripFromStorage(tripId);
+		console.log("[TravelAgent] loadTrip: success", ok);
 		return { success: ok };
+	}
+
+	@callable({ description: "Start a new trip thread (saves current thread to storage and switches to a fresh one)" })
+	async startNewTrip(): Promise<Awaited<ReturnType<TravelAgent["getState"]>>> {
+		await this.ensureStateLoaded();
+		await this.saveCurrentTripAndStartNew();
+		if (!this.state.currentTripId) {
+			const newId = crypto.randomUUID();
+			this.setState({ ...this.state, currentTripId: newId });
+			await this.doStorage.put("currentThreadId", newId);
+		}
+		console.log("[TravelAgent] startNewTrip: new currentTripId", this.state.currentTripId);
+		return this.getState();
 	}
 
 	@callable({ description: "One-time hard clear of all recentMessages for this session" })
 	async clearRecentMessages(): Promise<{ success: boolean }> {
+		console.log("[TravelAgent] clearRecentMessages: clearing recentMessages");
 		this.setState({ ...this.state, recentMessages: [] });
 		return { success: true };
 	}
@@ -1002,6 +1107,7 @@ export class TravelAgent extends Agent<Env, TravelState> {
 			nextState.currentIntent = stateUpdate.currentIntent ?? null;
 		}
 		this.setState(nextState);
+		await this.persistCurrentThread();
 		return { success: true };
 	}
 

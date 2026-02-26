@@ -117,6 +117,11 @@ export default {
 			return handleTravelAgentLoadTrip(request, env);
 		}
 
+		// Start new trip thread (save current, switch to fresh)
+		if (url.pathname === "/api/agents/TravelAgent/startNewTrip" && request.method === "POST") {
+			return handleTravelAgentStartNewTrip(request, env);
+		}
+
 		// One-time hard clear of recentMessages for a session
 		if (url.pathname === "/api/agents/TravelAgent/clear" && request.method === "POST") {
 			return handleTravelAgentClear(request, env);
@@ -226,10 +231,12 @@ async function accumulateSSEStream(stream: ReadableStream<Uint8Array>, maxLength
  * POST body: { message: string, sessionId?: string }. Returns Workers AI SSE stream.
  */
 async function handleTravelAgentStream(request: Request, env: Env): Promise<Response> {
+	console.log("[TravelAgent stream] handleTravelAgentStream: request received");
 	try {
 		const body = (await request.json()) as { message?: string; sessionId?: string };
 		const message = typeof body?.message === "string" ? body.message.trim() : "";
 		const sessionId = typeof body?.sessionId === "string" && body.sessionId.trim() ? body.sessionId.trim() : "default";
+		console.log("[TravelAgent stream] sessionId:", sessionId, "message length:", message.length);
 		if (!message) {
 			return new Response(JSON.stringify({ error: "message is required" }), {
 				status: 400,
@@ -255,7 +262,9 @@ async function handleTravelAgentStream(request: Request, env: Env): Promise<Resp
 		}
 
 		// Intent and new-trip were already set by prepareTurn in the DO; use returned state as-is
+		console.log("[TravelAgent stream] calling runPipeline");
 		const stream = await runPipeline(env, message, tripState);
+		console.log("[TravelAgent stream] runPipeline returned, streaming response");
 		const [clientStream, accStream] = stream.tee();
 
 		// Persist assistant response to DO when stream completes
@@ -301,6 +310,7 @@ async function handleTravelAgentStream(request: Request, env: Env): Promise<Resp
 async function handleTravelAgentState(request: Request, env: Env): Promise<Response> {
 	const url = new URL(request.url);
 	const sessionId = url.searchParams.get("sessionId")?.trim() || "default";
+	console.log("[TravelAgent state] GET state, sessionId:", sessionId);
 	try {
 		const rpcRequest = new Request(new URL(`/agents/TravelAgent/${sessionId}/rpc`, request.url).toString(), {
 			method: "POST",
@@ -321,10 +331,12 @@ async function handleTravelAgentState(request: Request, env: Env): Promise<Respo
  * POST /api/agents/TravelAgent/loadTrip — body: { sessionId: string, tripId: string }. Load trip thread into session.
  */
 async function handleTravelAgentLoadTrip(request: Request, env: Env): Promise<Response> {
+	console.log("[TravelAgent loadTrip] POST loadTrip received");
 	try {
 		const body = (await request.json()) as { sessionId?: string; tripId?: string };
 		const sessionId = typeof body?.sessionId === "string" && body.sessionId.trim() ? body.sessionId.trim() : "default";
 		const tripId = typeof body?.tripId === "string" && body.tripId.trim() ? body.tripId.trim() : "";
+		console.log("[TravelAgent loadTrip] sessionId:", sessionId, "tripId:", tripId);
 		if (!tripId) {
 			return new Response(JSON.stringify({ error: "tripId is required" }), { status: 400, headers: { "content-type": "application/json" } });
 		}
@@ -344,13 +356,40 @@ async function handleTravelAgentLoadTrip(request: Request, env: Env): Promise<Re
 }
 
 /**
+ * POST /api/agents/TravelAgent/startNewTrip — save current thread and start a new one. Body: { sessionId?: string }.
+ */
+async function handleTravelAgentStartNewTrip(request: Request, env: Env): Promise<Response> {
+	try {
+		const body = (await request.json().catch(() => ({}))) as { sessionId?: string };
+		const sessionId = typeof body?.sessionId === "string" && body.sessionId.trim() ? body.sessionId.trim() : "default";
+		const rpcRequest = new Request(new URL(`/agents/TravelAgent/${sessionId}/rpc`, request.url).toString(), {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ type: "rpc", id: "start-new-trip-" + Date.now(), method: "startNewTrip", args: [] }),
+		});
+		const res = await routeTravelAgentRequest(rpcRequest, env);
+		if (!res?.ok) {
+			console.warn("[TravelAgent startNewTrip] DO returned", res?.status, "- ensure Worker/DO bundle is up to date (restart npm run dev or redeploy)");
+			return new Response(JSON.stringify({ error: "Failed to start new trip" }), { status: 502, headers: { "content-type": "application/json" } });
+		}
+		const data = (await res.json()) as { result?: unknown };
+		return new Response(JSON.stringify(data.result ?? {}), { headers: { "content-type": "application/json" } });
+	} catch (e) {
+		console.warn("[TravelAgent startNewTrip]", e);
+		return new Response(JSON.stringify({ error: "Failed to start new trip" }), { status: 500, headers: { "content-type": "application/json" } });
+	}
+}
+
+/**
  * POST /api/agents/TravelAgent/clear — one-time hard clear of recentMessages for the session.
  * Body: { sessionId?: string }. Uses sessionId or "default".
  */
 async function handleTravelAgentClear(request: Request, env: Env): Promise<Response> {
+	console.log("[TravelAgent clear] POST clear received");
 	try {
 		const body = (await request.json().catch(() => ({}))) as { sessionId?: string };
 		const sessionId = typeof body?.sessionId === "string" && body.sessionId.trim() ? body.sessionId.trim() : "default";
+		console.log("[TravelAgent clear] sessionId:", sessionId);
 		const rpcRequest = new Request(new URL(`/agents/TravelAgent/${sessionId}/rpc`, request.url).toString(), {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
