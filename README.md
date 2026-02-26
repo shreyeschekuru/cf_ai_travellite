@@ -1,4 +1,4 @@
-# travellite
+# ![Alt text](public/travellite-logo-full.png)
 
 A travel assistant chat app powered by Cloudflare Workers AI. Plan trips, search flights and hotels, and get destination ideas with streaming responses, per-user conversation threads, and optional real-time collaboration.
 
