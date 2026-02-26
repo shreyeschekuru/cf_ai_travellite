@@ -36,25 +36,28 @@
 				flex-direction: column;
 			}
 
-			/* Header / breadcrumb */
+			/* Header: logo + badge top left */
 			.page-header {
-				padding: 24px 24px 16px;
-				max-width: 1100px;
-				margin: 0 auto;
+				display: flex;
+				align-items: center;
+				justify-content: flex-start;
+				gap: 12px;
+				padding: 16px 24px;
 				width: 100%;
+				flex-shrink: 0;
 			}
 			.brand-heading {
 				display: flex;
 				align-items: center;
-				gap: 12px;
+				gap: 10px;
 			}
 			.brand-logo {
-				height: 44px;
+				height: 56px;
 				width: auto;
 				display: block;
 			}
 			.page-header h1 {
-				font-size: 1.5rem;
+				font-size: 1.75rem;
 				color: var(--primary);
 				font-weight: 700;
 				font-family: "Quicksand", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -67,29 +70,12 @@
 			.brand-lite {
 				color: var(--teal);
 			}
-			.page-header .subtitle {
-				font-size: 0.875rem;
-				color: var(--teal);
-				margin-top: 4px;
-			}
-			#realtime-status {
-				font-size: 0.8rem;
-				color: var(--teal);
-				margin-top: 8px;
-				padding: 8px 12px;
-				background: var(--cream-card);
-				border-radius: 8px;
-				border: 1px solid var(--teal-border);
-			}
-
 			/* Main chat area */
 			.chat-wrapper {
 				flex: 1;
 				display: flex;
 				flex-direction: column;
-				max-width: 1000px;
-				width: 100%;
-				margin: 0 auto;
+				min-width: 0;
 				padding: 0 24px 24px;
 			}
 			.chat-card {
@@ -124,6 +110,12 @@
 				margin: 0;
 				font-size: 0.95rem;
 			}
+			.message .msg-link {
+				color: var(--teal);
+				word-break: break-all;
+			}
+			.assistant-message .msg-link { color: var(--teal); }
+			.user-message .msg-link { color: rgba(255,255,255,0.95); text-decoration: underline; }
 			.assistant-message {
 				align-self: flex-start;
 				background: var(--agent-bg);
@@ -257,23 +249,21 @@
 			}
 			#send-button:disabled { opacity: 0.6; cursor: not-allowed; }
 
-			/* Trips sidebar (ChatGPT-style threads) */
+			/* Trips sidebar | Chat */
 			.app-layout {
 				display: flex;
 				flex: 1;
 				min-height: 0;
-				max-width: 1200px;
-				margin: 0 auto;
 				width: 100%;
 			}
 			.trips-sidebar {
 				width: 240px;
 				flex-shrink: 0;
 				background: var(--cream-card);
-				border-radius: 12px;
-				margin: 0 16px 24px 24px;
-				padding: 12px;
+				border-radius: 16px;
 				box-shadow: var(--shadow);
+				padding: 12px;
+				margin: 0 16px 24px 24px;
 				display: flex;
 				flex-direction: column;
 				min-height: 200px;
@@ -316,11 +306,50 @@
 			.trip-item .trip-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 			.trip-item .trip-date { font-size: 0.75rem; color: var(--teal); margin-top: 2px; }
 
+			.sidebar-recent {
+				margin-top: 16px;
+				padding-top: 12px;
+				border-top: 1px solid var(--teal-border);
+				flex-shrink: 0;
+			}
+			.sidebar-recent h3 {
+				font-size: 0.9rem;
+				color: var(--teal);
+				margin: 0 0 8px;
+				padding-bottom: 6px;
+			}
+			.sidebar-messages {
+				display: flex;
+				flex-direction: column;
+				gap: 6px;
+				max-height: 200px;
+				overflow-y: auto;
+			}
+			.sidebar-msg {
+				font-size: 0.8rem;
+				padding: 6px 8px;
+				border-radius: 8px;
+				background: rgba(84, 134, 135, 0.08);
+				color: var(--primary);
+				overflow: hidden;
+				text-overflow: ellipsis;
+				display: -webkit-box;
+				-webkit-line-clamp: 2;
+				-webkit-box-orient: vertical;
+				line-clamp: 2;
+			}
+			.sidebar-msg.user {
+				background: var(--teal-muted);
+				color: var(--primary);
+			}
+
 			@media (max-width: 768px) {
 				.trips-sidebar { display: none; }
 			}
 			@media (max-width: 640px) {
-				.page-header { padding: 16px 16px 12px; }
+				.page-header { padding: 12px 16px; }
+				.brand-logo { height: 44px; }
+				.page-header h1 { font-size: 1.4rem; }
 				.chat-wrapper { padding: 0 16px 16px; }
 				.message { max-width: 92%; }
 			}
@@ -333,14 +362,16 @@
 				<img src="/travellite-hawk-logo.png" alt="" class="brand-logo" aria-hidden="true" />
 				<h1><span class="brand-travel">travel</span><span class="brand-lite">lite</span></h1>
 			</div>
-			<p class="subtitle">Plan trips, flights, hotels & activities</p>
-			<p id="realtime-status">Connecting…</p>
 		</div>
 
 		<div class="app-layout">
 			<aside class="trips-sidebar" id="trips-sidebar">
 				<h2>Trips</h2>
 				<div class="trips-list" id="trips-list"></div>
+				<div class="sidebar-recent">
+					<h3>Recent</h3>
+					<div class="sidebar-messages" id="sidebar-messages"></div>
+				</div>
 			</aside>
 			<div class="chat-wrapper">
 			<div class="chat-card">
@@ -379,7 +410,6 @@
 			const userInput = document.getElementById('user-input');
 			const sendButton = document.getElementById('send-button');
 			const typingEl = document.getElementById('typing-indicator');
-			const statusEl = document.getElementById('realtime-status');
 			let isProcessing = false;
 			let meeting = null;
 			let roomId = sessionStorage.getItem('travel-agent-room') || ('travel-agent-' + Math.random().toString(36).slice(2, 12));
@@ -389,7 +419,8 @@
 
 			let appState = { currentTripId: null, trips: [], recentMessages: [], currentTripTitle: '' };
 
-			async function fetchState() {
+			async function fetchState(opts) {
+				const skipMainChat = opts && opts.skipMainChat === true;
 				try {
 					const res = await fetch('/api/agents/TravelAgent/state?sessionId=' + encodeURIComponent(userId));
 					if (!res.ok) return;
@@ -401,8 +432,25 @@
 						currentTripTitle: state.currentTripTitle || 'New trip'
 					};
 					renderTrips();
-					renderMessages();
+					renderSidebarMessages();
+					if (!skipMainChat) renderMessages();
 				} catch (e) { console.warn('fetchState', e); }
+			}
+
+			function renderSidebarMessages() {
+				const container = document.getElementById('sidebar-messages');
+				if (!container) return;
+				const msgs = appState.recentMessages || [];
+				if (msgs.length === 0) {
+					container.innerHTML = '<span class="sidebar-msg" style="color:var(--teal-muted);font-style:italic;">No messages yet</span>';
+					return;
+				}
+				container.innerHTML = msgs.map(function (m) {
+					const text = (m.content || '').trim().replace(/</g, '&lt;').replace(/>/g, '&gt;');
+					const label = m.role === 'user' ? 'You' : 'Agent';
+					return '<div class="sidebar-msg ' + m.role + '" title="' + text + '">' +
+						'<strong>' + label + ':</strong> ' + (text.length > 60 ? text.substring(0, 57) + '…' : text) + '</div>';
+				}).join('');
 			}
 
 			function renderTrips() {
@@ -428,20 +476,26 @@
 				});
 			}
 
+			function escapeHtml(text) {
+				return (text || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+			}
+			function formatMessageContent(content) {
+				const str = content || '';
+				// Linkify URLs so long Google/search links don't dominate the bubble
+				const parts = str.split(/(https?:\/\/[^\s]+)/g);
+				return parts.map(function (part) {
+					if (/^https?:\/\//.test(part)) {
+						const label = part.length > 56 ? part.substring(0, 53) + '…' : part;
+						return '<a href="' + escapeHtml(part) + '" target="_blank" rel="noopener" class="msg-link">' + escapeHtml(label) + '</a>';
+					}
+					return escapeHtml(part);
+				}).join('');
+			}
 			function renderMessages() {
 				const container = document.getElementById('chat-messages');
 				if (!container) return;
-				const msgs = appState.recentMessages || [];
-				let html = '';
-				if (msgs.length === 0) {
-					html = '<div class="message assistant-message"><div class="avatar" aria-hidden="true"></div><p>Hi, I\'m your travel agent. Plan trips, find flights and hotels, or ask for activities. Type below or pick a quick action.</p></div>';
-				} else {
-					msgs.forEach(function (m) {
-						const content = (m.content || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-						if (m.role === 'assistant') html += '<div class="message assistant-message"><div class="avatar" aria-hidden="true"></div><p>' + content + '</p></div>';
-						else html += '<div class="message user-message"><p>' + content + '</p><span class="sent-check" aria-hidden="true">✓</span></div>';
-					});
-				}
+				// Main chat does not show previous messages (only sidebar does); always show welcome.
+				const html = '<div class="message assistant-message"><div class="avatar" aria-hidden="true"></div><p>Hi, I\'m your travel agent. Plan trips, find flights and hotels, or ask for activities. Type below or pick a quick action.</p></div>';
 				container.innerHTML = html;
 			}
 
@@ -493,27 +547,18 @@
 						const err = await res.json().catch(() => ({}));
 						const step = err.step || '';
 						const details = err.details != null ? (typeof err.details === 'string' ? err.details : JSON.stringify(err.details)) : err.message || res.statusText;
-						if (res.status === 503) {
-							statusEl.textContent = 'Two-way: response stream to UI and UI streams back.';
-						} else {
-							statusEl.textContent = 'Token error (' + (step || res.status) + '): ' + (details.substring(0, 120) + (details.length > 120 ? '…' : ''));
-						}
 						return;
 					}
 					const { meetingId, authToken } = await res.json();
-					if (!authToken) { statusEl.textContent = 'No auth token returned.'; return; }
+					if (!authToken) return;
 					roomId = meetingId || roomId;
 					sessionStorage.setItem('travel-agent-room', roomId);
-					if (typeof RealtimeKit === 'undefined') {
-						statusEl.textContent = 'Two-way: response stream to UI and UI streams back.';
-						return;
-					}
+					if (typeof RealtimeKit === 'undefined') return;
 					meeting = await RealtimeKit.init({
 						authToken: authToken,
 						defaults: { audio: false, video: false }
 					});
 					await meeting.join();
-					statusEl.textContent = 'Two-way: response stream to UI and UI streams back.';
 					if (meeting.chat && meeting.chat.messages) {
 						const checkMessages = () => {
 							const messages = meeting.chat.messages || [];
@@ -532,9 +577,7 @@
 						};
 						setInterval(checkMessages, 300);
 					}
-				} catch (e) {
-					statusEl.textContent = 'Two-way: response stream to UI and UI streams back.';
-				}
+				} catch (e) {}
 			}
 
 			initRealtime();
@@ -616,7 +659,7 @@
 					sendButton.disabled = false;
 					isProcessing = false;
 					userInput.focus();
-					fetchState();
+					fetchState({ skipMainChat: true });
 				}
 			}
 		</script>

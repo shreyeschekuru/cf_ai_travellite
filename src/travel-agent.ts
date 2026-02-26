@@ -279,6 +279,9 @@ export class TravelAgent extends Agent<Env, TravelState> {
 							case "loadTrip":
 								method = this.loadTrip;
 								break;
+							case "clearRecentMessages":
+								method = this.clearRecentMessages;
+								break;
 						}
 					}
 					if (method && typeof method === "function") {
@@ -974,6 +977,12 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	async loadTrip(tripId: string): Promise<{ success: boolean }> {
 		const ok = await this.loadTripFromSql(tripId);
 		return { success: ok };
+	}
+
+	@callable({ description: "One-time hard clear of all recentMessages for this session" })
+	async clearRecentMessages(): Promise<{ success: boolean }> {
+		this.setState({ ...this.state, recentMessages: [] });
+		return { success: true };
 	}
 
 	@callable({ description: "Append user and assistant messages to conversation history and persist" })

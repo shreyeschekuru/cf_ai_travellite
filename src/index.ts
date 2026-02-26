@@ -117,6 +117,11 @@ export default {
 			return handleTravelAgentLoadTrip(request, env);
 		}
 
+		// One-time hard clear of recentMessages for a session
+		if (url.pathname === "/api/agents/TravelAgent/clear" && request.method === "POST") {
+			return handleTravelAgentClear(request, env);
+		}
+
 		// Send message into the single-door flow (same as webhook: triggers TravelAgent DO → Realtime)
 		// POST body: { roomId, userId?, text }. Used when the UI cannot send via Realtime client (e.g. testing).
 		if (url.pathname === "/api/realtime/send" && request.method === "POST") {
@@ -335,6 +340,29 @@ async function handleTravelAgentLoadTrip(request: Request, env: Env): Promise<Re
 	} catch (e) {
 		console.warn("[TravelAgent loadTrip]", e);
 		return new Response(JSON.stringify({ error: "Failed to load trip" }), { status: 500, headers: { "content-type": "application/json" } });
+	}
+}
+
+/**
+ * POST /api/agents/TravelAgent/clear — one-time hard clear of recentMessages for the session.
+ * Body: { sessionId?: string }. Uses sessionId or "default".
+ */
+async function handleTravelAgentClear(request: Request, env: Env): Promise<Response> {
+	try {
+		const body = (await request.json().catch(() => ({}))) as { sessionId?: string };
+		const sessionId = typeof body?.sessionId === "string" && body.sessionId.trim() ? body.sessionId.trim() : "default";
+		const rpcRequest = new Request(new URL(`/agents/TravelAgent/${sessionId}/rpc`, request.url).toString(), {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ type: "rpc", id: "clear-" + Date.now(), method: "clearRecentMessages", args: [] }),
+		});
+		const res = await routeTravelAgentRequest(rpcRequest, env);
+		if (!res?.ok) return new Response(JSON.stringify({ error: "Failed to clear" }), { status: 502, headers: { "content-type": "application/json" } });
+		const data = (await res.json()) as { result?: { success?: boolean } };
+		return new Response(JSON.stringify(data.result ?? { success: false }), { headers: { "content-type": "application/json" } });
+	} catch (e) {
+		console.warn("[TravelAgent clear]", e);
+		return new Response(JSON.stringify({ error: "Failed to clear" }), { status: 500, headers: { "content-type": "application/json" } });
 	}
 }
 
