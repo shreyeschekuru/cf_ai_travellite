@@ -360,7 +360,16 @@ async function handleTravelAgentLoadTrip(request: Request, env: Env): Promise<Re
  */
 async function handleTravelAgentStartNewTrip(request: Request, env: Env): Promise<Response> {
 	try {
-		const body = (await request.json().catch(() => ({}))) as { sessionId?: string };
+		const rawBody = await request.text().catch(() => "");
+		console.log("[TravelAgent startNewTrip] POST body:", rawBody || "<empty>");
+		let body: { sessionId?: string } = {};
+		if (rawBody) {
+			try {
+				body = JSON.parse(rawBody) as { sessionId?: string };
+			} catch {
+				console.warn("[TravelAgent startNewTrip] Failed to parse JSON body");
+			}
+		}
 		const sessionId = typeof body?.sessionId === "string" && body.sessionId.trim() ? body.sessionId.trim() : "default";
 		const rpcRequest = new Request(new URL(`/agents/TravelAgent/${sessionId}/rpc`, request.url).toString(), {
 			method: "POST",
