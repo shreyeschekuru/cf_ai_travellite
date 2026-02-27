@@ -54,15 +54,17 @@ export interface TravelState {
 	trips?: Array<{ id: string; title: string; createdAt: string }>;
 }
 
-/** Stored thread snapshot in DO storage (key: `thread:${id}`) */
-type StoredThread = {
+/** Thread-level structured state (metadata + trip data) stored at `thread:{id}:state` */
+type ThreadStateSnapshot = {
 	title: string;
 	createdAt: string;
-	messages: TravelState["recentMessages"];
 	basics: TripBasics;
 	preferences: string[];
 	currentIntent: string | null;
 };
+
+/** Thread-level conversation history stored at `thread:{id}:history` */
+type ThreadHistory = TravelState["recentMessages"];
 
 /**
  * Travel Agent class that extends Agent for travel-related tasks
@@ -122,17 +124,25 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		try {
 			const currentThreadId = await this.doStorage.get<string>("currentThreadId");
 			if (currentThreadId) {
-				const stored = await this.doStorage.get<StoredThread>(`thread:${currentThreadId}`);
-				if (stored) {
+				const [stateSnapshot, history] = await Promise.all([
+					this.doStorage.get<ThreadStateSnapshot>(`thread:${currentThreadId}:state`),
+					this.doStorage.get<ThreadHistory>(`thread:${currentThreadId}:history`),
+				]);
+				if (stateSnapshot) {
 					this.setState({
 						...this.state,
 						currentTripId: currentThreadId,
-						recentMessages: stored.messages ?? [],
-						basics: stored.basics ?? {},
-						preferences: stored.preferences ?? [],
-						currentIntent: stored.currentIntent ?? null,
+						recentMessages: history ?? [],
+						basics: stateSnapshot.basics ?? {},
+						preferences: stateSnapshot.preferences ?? [],
+						currentIntent: stateSnapshot.currentIntent ?? null,
 					});
-					console.log("[TravelAgent] ensureStateLoaded: restored current thread", currentThreadId, "messages:", (stored.messages ?? []).length);
+					console.log(
+						"[TravelAgent] ensureStateLoaded: restored current thread",
+						currentThreadId,
+						"messages:",
+						(history ?? []).length,
+					);
 				}
 			}
 			this._storageLoaded = true;
@@ -177,20 +187,8 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		const msgCount = (this.state.recentMessages ?? []).length;
 		console.log("[TravelAgent] saveCurrentTripAndStartNew: saving thread", id, "title:", title, "messages:", msgCount);
 		try {
-			const stored: StoredThread = {
-				title,
-				createdAt: new Date().toISOString(),
-				messages: this.state.recentMessages ?? [],
-				basics: this.state.basics ?? {},
-				preferences: this.state.preferences ?? [],
-				currentIntent: this.state.currentIntent ?? null,
-			};
-			await this.doStorage.put(`thread:${id}`, stored);
-			const threads = (await this.doStorage.get<Array<{ id: string; title: string; createdAt: string }>>("threads")) ?? [];
-			const existing = threads.findIndex((t) => t.id === id);
-			const entry = { id, title, createdAt: stored.createdAt };
-			const next = existing >= 0 ? threads.map((t, i) => (i === existing ? entry : t)) : [entry, ...threads];
-			await this.doStorage.put("threads", next);
+			// Persist current thread state + history using shared helper
+			await this.persistCurrentThread();
 			console.log("[TravelAgent] saveCurrentTripAndStartNew: saved to DO storage, rotating to new thread");
 		} catch (e) {
 			console.error("[TravelAgent] saveCurrentTripAndStartNew error:", e);
@@ -213,19 +211,29 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	private async loadTripFromStorage(tripId: string): Promise<boolean> {
 		await this.ensureStateLoaded();
 		try {
-			const stored = await this.doStorage.get<StoredThread>(`thread:${tripId}`);
-			if (!stored) {
-				console.log("[TravelAgent] loadTripFromStorage: no data for tripId", tripId);
+			const [stateSnapshot, history] = await Promise.all([
+				this.doStorage.get<ThreadStateSnapshot>(`thread:${tripId}:state`),
+				this.doStorage.get<ThreadHistory>(`thread:${tripId}:history`),
+			]);
+			if (!stateSnapshot) {
+				console.log("[TravelAgent] loadTripFromStorage: no state for tripId", tripId);
 				return false;
 			}
-			console.log("[TravelAgent] loadTripFromStorage: loading thread", tripId, "title:", stored.title, "messages:", (stored.messages ?? []).length);
+			console.log(
+				"[TravelAgent] loadTripFromStorage: loading thread",
+				tripId,
+				"title:",
+				stateSnapshot.title,
+				"messages:",
+				(history ?? []).length,
+			);
 			this.setState({
 				...this.state,
 				currentTripId: tripId,
-				basics: stored.basics ?? {},
-				preferences: stored.preferences ?? [],
-				recentMessages: stored.messages ?? [],
-				currentIntent: stored.currentIntent ?? null,
+				basics: stateSnapshot.basics ?? {},
+				preferences: stateSnapshot.preferences ?? [],
+				recentMessages: history ?? [],
+				currentIntent: stateSnapshot.currentIntent ?? null,
 			});
 			await this.doStorage.put("currentThreadId", tripId);
 			return true;
@@ -241,18 +249,21 @@ export class TravelAgent extends Agent<Env, TravelState> {
 		if (!id) return;
 		try {
 			const title = this.deriveTripTitle(this.state.basics, this.state.recentMessages);
-			const stored: StoredThread = {
+			const snapshot: ThreadStateSnapshot = {
 				title,
 				createdAt: new Date().toISOString(),
-				messages: this.state.recentMessages ?? [],
 				basics: this.state.basics ?? {},
 				preferences: this.state.preferences ?? [],
 				currentIntent: this.state.currentIntent ?? null,
 			};
-			await this.doStorage.put(`thread:${id}`, stored);
+			const history: ThreadHistory = this.state.recentMessages ?? [];
+			await Promise.all([
+				this.doStorage.put(`thread:${id}:state`, snapshot),
+				this.doStorage.put(`thread:${id}:history`, history),
+			]);
 			const threads = (await this.doStorage.get<Array<{ id: string; title: string; createdAt: string }>>("threads")) ?? [];
 			const existing = threads.findIndex((t) => t.id === id);
-			const entry = { id, title, createdAt: stored.createdAt };
+			const entry = { id, title, createdAt: snapshot.createdAt };
 			const next = existing >= 0 ? threads.map((t, i) => (i === existing ? entry : t)) : [entry, ...threads];
 			await this.doStorage.put("threads", next);
 		} catch (e) {
