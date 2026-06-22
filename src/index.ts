@@ -25,64 +25,27 @@ const SYSTEM_PROMPT =
 	"You are a helpful, friendly assistant. Provide concise and accurate responses.";
 
 /**
- * Helper function to route TravelAgent requests to the Durable Object
- * This is the working pattern that routes correctly
+ * Helper to route RPC requests to TravelAgent Durable Object
  */
 async function routeTravelAgentRequest(
 	request: Request,
 	env: Env,
 ): Promise<Response | null> {
 	const url = new URL(request.url);
-	console.log("[routeTravelAgentRequest] Checking path:", url.pathname);
 
 	if (url.pathname.startsWith("/agents/TravelAgent/")) {
-		console.log("[routeTravelAgentRequest] TravelAgent path detected");
-		// Extract session name from path: /agents/TravelAgent/{sessionName}/...
 		const pathParts = url.pathname.split("/");
 		if (pathParts.length >= 4) {
 			const sessionName = pathParts[3];
-			console.log("[routeTravelAgentRequest] Session name:", sessionName);
 			const agentId = env.TravelAgent.idFromName(sessionName);
 			const stub = env.TravelAgent.get(agentId);
-			console.log("[routeTravelAgentRequest] Stub ID:", stub.id.toString());
-			
-			// Add PartyServer-required headers
-			const headers = new Headers(request.headers);
-			headers.set("x-partykit-room", sessionName);
-			
-			// Only read and include body for methods that support it (POST, PUT, PATCH)
-			const methodsWithBody = ["POST", "PUT", "PATCH"];
-			const hasBody = methodsWithBody.includes(request.method);
-			let body: ArrayBuffer | null = null;
-			if (hasBody) {
-				try {
-					const clonedRequest = request.clone();
-					body = await clonedRequest.arrayBuffer();
-					console.log("[routeTravelAgentRequest] Body read successfully, length:", body.byteLength);
-				} catch (error) {
-					console.error("[routeTravelAgentRequest] Error reading body:", error);
-					body = null;
-				}
-			}
 
-			// Construct a valid URL with dummy base (DO stub requires absolute URL)
-			const doPath = url.pathname + (url.search || "");
-			const doUrl = new URL(doPath, "https://dummy").toString();
-			const modifiedRequest = new Request(doUrl, {
-				method: request.method,
-				headers: headers,
-				body: body,
-			});
-			
-			console.log("[routeTravelAgentRequest] Calling stub.fetch()...");
-			console.log("[routeTravelAgentRequest] DO Request URL:", modifiedRequest.url);
-			console.log("[routeTravelAgentRequest] Request method:", modifiedRequest.method);
-			const response = await stub.fetch(modifiedRequest);
-			console.log("[routeTravelAgentRequest] stub.fetch() completed, status:", response.status);
+			// Forward to the DO
+			const response = await stub.fetch(request.clone());
 			return response;
 		}
 	}
-	console.log("[routeTravelAgentRequest] Not a TravelAgent path, returning null");
+
 	return null;
 }
 
@@ -138,12 +101,10 @@ export default {
 			return handleRealtimeToken(request, env);
 		}
 
-		// Route TravelAgent RPC and HTTP to the Durable Object
-		if (url.pathname.startsWith("/agents/TravelAgent/")) {
-			const agentResponse = await routeTravelAgentRequest(request, env);
-			if (agentResponse) {
-				return agentResponse;
-			}
+		// Route agent RPC requests
+		const agentResponse = await routeTravelAgentRequest(request, env);
+		if (agentResponse) {
+			return agentResponse;
 		}
 
 		// Handle static assets (frontend)

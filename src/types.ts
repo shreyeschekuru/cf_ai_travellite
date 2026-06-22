@@ -12,6 +12,26 @@ export interface Env extends Cloudflare.Env {
 }
 
 /**
+ * Agent state for TravelAgent Durable Object
+ * Managed by Agents SDK via setState()
+ */
+export interface TravelState {
+	basics: {
+		origin?: string;
+		destination?: string;
+		startDate?: string;
+		endDate?: string;
+		budget?: number;
+	};
+	preferences: string[];
+	currentItinerary: Record<string, unknown>;
+	recentMessages: Array<{ role: "user" | "assistant"; content: string }>;
+	currentIntent?: string | null;
+	currentTripId?: string | null;
+	trips?: Array<{ id: string; title: string; createdAt: string }>;
+}
+
+/**
  * Represents a chat message.
  */
 export interface ChatMessage {

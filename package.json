@@ -45,8 +45,11 @@
 		"seed:rag": "node scripts/seed-rag.js"
 	},
 	"dependencies": {
+		"@cloudflare/ai-chat": "latest",
 		"@cloudflare/realtimekit-react": "^1.2.4",
 		"@cloudflare/realtimekit-react-ui": "^1.1.0",
-		"agents": "^0.4.1"
+		"ai": "latest",
+		"agents": "^0.4.1",
+		"react": "^18.3.1"
 	}
 }

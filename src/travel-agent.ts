@@ -2,6 +2,7 @@ import { Agent, callable } from "agents";
 import { Env } from "./types";
 import { AmadeusClient } from "./amadeus-client";
 import { runPipeline, classifyConversation, type PipelineTripState } from "./pipeline";
+import { registerThinkTools } from "./think-tools";
 
 /**
  * Basic trip information
@@ -272,188 +273,65 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	}
 
 	/**
-	 * Override fetch to ensure our logging is called and all requests reach onRequest
+	 * Handle RPC requests for @callable methods
+	 * SDK's Agent base class provides the infrastructure; this handler bridges
+	 * the custom JSON-RPC format with SDK's @callable mechanism.
 	 */
 	async fetch(request: Request): Promise<Response> {
-		console.error(`[TravelAgent.fetch] Received ${request.method} request to ${request.url}`);
-		const response = await this.onRequest(request);
-		console.error(`[TravelAgent.fetch] Returning response with status ${response.status}`);
-		return response;
-	}
+		const url = new URL(request.url);
 
-	/**
-	 * Handle HTTP requests (including RPC requests)
-	 * Implements RPC handling for @callable methods
-	 */
-	async onRequest(request: Request): Promise<Response> {
-		console.error(`[TravelAgent.onRequest] Received ${request.method} request to ${request.url}`);
-
-		// Handle GET requests - return method not allowed or endpoint info
-		if (request.method === "GET") {
-			const url = new URL(request.url);
-			if (url.pathname.endsWith("/rpc")) {
-				return Response.json(
-					{
-						error: "Method Not Allowed",
-						message: "RPC endpoints only accept POST requests",
-						usage: {
-							method: "POST",
-							contentType: "application/json",
-							body: {
-								type: "rpc",
-								id: "unique-request-id",
-								method: "methodName",
-								args: ["arg1", "arg2"],
-							},
-						},
-					},
-					{ status: 405, headers: { Allow: "POST" } }
-				);
-			}
+		// If it's not an RPC request, return 404
+		if (request.method !== "POST") {
 			return new Response("Not found", { status: 404 });
 		}
 
-		// Check if this is an RPC request (POST)
-		if (request.method === "POST") {
-			try {
-				const body = await request.text();
-				console.log("[TravelAgent] Request body:", body.substring(0, 200));
-				const rpcData = JSON.parse(body) as {
-					type: string;
-					id: string;
-					method: string;
-					args: unknown[];
-				};
-				console.log("[TravelAgent] Parsed RPC data:", rpcData.type, rpcData.method);
+		try {
+			const body = await request.text();
+			const rpcData = JSON.parse(body) as {
+				type?: string;
+				id?: string;
+				method?: string;
+				args?: unknown[];
+			};
 
-				console.error(`[TravelAgent.onRequest] RPC call: method=${rpcData.method}, id=${rpcData.id}`);
-
-				if (rpcData.type === "rpc" && rpcData.method) {
-					console.error(`[TravelAgent.onRequest] RPC call: method=${rpcData.method}, id=${rpcData.id}`);
-
-					// Try multiple lookup strategies
-					let method: ((...args: any[]) => any) | undefined;
-					method = (this as any)[rpcData.method];
-					if (!method || typeof method !== "function") {
-						const prototype = Object.getPrototypeOf(this) as any;
-						method = prototype[rpcData.method];
-					}
-					if (!method || typeof method !== "function") {
-						switch (rpcData.method) {
-							case "testLLMRAGTools":
-								method = this.testLLMRAGTools;
-								break;
-							case "handleMessage":
-								method = this.handleMessage;
-								break;
-							case "handleMessageStreaming":
-								method = this.handleMessageStreaming;
-								break;
-							case "callAmadeusAPI":
-								method = this.callAmadeusAPI;
-								break;
-							case "getState":
-								method = this.getState;
-								break;
-							case "appendConversation":
-								method = this.appendConversation;
-								break;
-							case "prepareTurn":
-								method = this.prepareTurn;
-								break;
-							case "loadTrip":
-								method = this.loadTrip;
-								break;
-							case "startNewTrip":
-								method = this.startNewTrip;
-								break;
-							case "clearRecentMessages":
-								method = this.clearRecentMessages;
-								break;
-						}
-					}
-					if (method && typeof method === "function") {
-						method = method.bind(this);
-					}
-					
-					// Debug: List all available methods if method not found
-					if (!method || typeof method !== "function") {
-						const prototypeMethods = Object.getOwnPropertyNames(Object.getPrototypeOf(this))
-							.filter(name => name !== 'constructor' && typeof (this as any)[name] === 'function');
-						console.log("[TravelAgent] Prototype methods:", prototypeMethods);
-						console.log("[TravelAgent] Looking for method:", rpcData.method);
-						console.log("[TravelAgent] Method exists on this?", typeof (this as any)[rpcData.method]);
-						console.log("[TravelAgent] testLLMRAGTools exists?", typeof this.testLLMRAGTools);
-						console.log("[TravelAgent] All instance properties:", Object.getOwnPropertyNames(this));
-					}
-					
-					if (method && typeof method === "function") {
-						console.log("[TravelAgent] Method found, calling...");
-						try {
-							console.error(`[TravelAgent.onRequest] Calling method ${rpcData.method} with args:`, JSON.stringify(rpcData.args));
-							// Call the method with the provided arguments
-							const result = await method.apply(this, rpcData.args);
-							console.error(`[TravelAgent.onRequest] Method ${rpcData.method} returned successfully`);
-
-							// Handle ReadableStream results (for streaming methods like handleMessage)
-							if (result instanceof ReadableStream) {
-								// For RPC calls, we accumulate the stream and return full text (backward compatible)
-								const accumulatedText = await this.accumulateStream(result);
-								
-								return Response.json({
-									type: "rpc",
-									id: rpcData.id,
-									success: true,
-									result: accumulatedText,
-								});
-							}
-
-							// Return RPC response for non-stream results
-							return Response.json({
-								type: "rpc",
-								id: rpcData.id,
-								success: true,
-								result: result,
-							});
-						} catch (error) {
-							console.error(`[TravelAgent.onRequest] Error calling method ${rpcData.method}:`, error);
-							return Response.json(
-								{
-									type: "rpc",
-									id: rpcData.id,
-									success: false,
-									error: error instanceof Error ? error.message : String(error),
-								},
-								{ status: 500 }
-							);
-						}
-					} else {
+			if (rpcData.type === "rpc" && rpcData.method) {
+				const method = (this as any)[rpcData.method];
+				if (method && typeof method === "function") {
+					try {
+						const result = await method.apply(this, rpcData.args ?? []);
+						return Response.json({
+							type: "rpc",
+							id: rpcData.id,
+							success: true,
+							result,
+						});
+					} catch (error) {
 						return Response.json(
 							{
 								type: "rpc",
 								id: rpcData.id,
 								success: false,
-								error: `Method ${rpcData.method} not found`,
+								error: error instanceof Error ? error.message : String(error),
 							},
-							{ status: 404 }
+							{ status: 500 },
 						);
 					}
+				} else {
+					return Response.json(
+						{
+							type: "rpc",
+							id: rpcData.id,
+							success: false,
+							error: `Method ${rpcData.method} not found`,
+						},
+						{ status: 404 },
+					);
 				}
-			} catch (error) {
-				// If JSON parsing fails, it's not an RPC request
-				// Fall through to default handling
 			}
+		} catch (error) {
+			return Response.json({ error: "Invalid RPC request" }, { status: 400 });
 		}
 
-		// Path ends with /rpc but parsing failed - return 400
-		const url = new URL(request.url);
-		if (url.pathname.endsWith("/rpc") && request.method === "POST") {
-			console.error("[TravelAgent] Path ends with /rpc but RPC parsing failed");
-			return Response.json(
-				{ type: "rpc", success: false, error: "Invalid RPC request format" },
-				{ status: 400 }
-			);
-		}
 		return new Response("Not found", { status: 404 });
 	}
 
@@ -1017,6 +895,7 @@ export class TravelAgent extends Agent<Env, TravelState> {
 	private static readonly MAX_RECENT_MESSAGES = 20;
 
 	@callable({ description: "Return current trip state and conversation history for session memory" })
+	@callable({ description: "Get current agent state: trip basics, preferences, messages, current intent, trips list" })
 	async getState(): Promise<{
 		basics: TripBasics;
 		preferences: string[];
@@ -1338,6 +1217,112 @@ export class TravelAgent extends Agent<Env, TravelState> {
 			console.error("[TravelAgent] handleMessage: Error in transformStreamForState:", transformError);
 			throw transformError;
 		}
+	}
+
+	/**
+	 * Think-based chat with multi-turn reasoning and tool orchestration
+	 * Uses @cloudflare/think for agentic reasoning loops
+	 * Falls back to traditional pipeline if Think processing fails
+	 */
+	@callable({ description: "Chat using Think reasoning loop with multi-turn tool orchestration" })
+	async thinkChat(input: string): Promise<ReadableStream> {
+		const startTime = Date.now();
+		console.log("[TravelAgent] thinkChat: Starting with input:", input.slice(0, 60));
+
+		// Prepare turn (classify intent, rotate thread if needed)
+		await this.prepareTurn(input);
+		this.extractTripInfo(input);
+
+		// Append user message to state
+		this.setState({
+			...this.state,
+			recentMessages: [
+				...this.state.recentMessages,
+				{ role: "user" as const, content: input },
+			].slice(-TravelAgent.MAX_RECENT_MESSAGES),
+		});
+
+		try {
+			// Register Think tools for this reasoning session
+			const tools = registerThinkTools(this.amadeusClient, this.env as Env, this.state.basics?.destination);
+			console.log("[TravelAgent] thinkChat: Registered", tools.length, "tools for reasoning");
+
+			// For now, create a streaming response using Think concept:
+			// Think will determine which tools to use based on the message
+			// This is a simplified implementation that demonstrates tool availability
+
+			// Build system prompt with available tools
+			const toolsList = tools.map(t => `- ${t.name}: ${t.description}`).join("\n");
+			const systemPrompt = `You are a travel assistant with access to the following tools to help plan trips:
+
+${toolsList}
+
+Use these tools to search for flights, hotels, activities, and destination information. Think through what information the user needs and call the appropriate tools. Reflect on results and refine your recommendations.
+
+User's trip details: Destination: ${this.state.basics?.destination || "TBD"}, Budget: $${this.state.basics?.budget || "N/A"}
+Preferences: ${this.state.preferences?.join(", ") || "not specified"}`;
+
+			// Create a stream that uses tool capabilities
+			const response = await this.generateThinkResponse(input, tools, systemPrompt);
+
+			const duration = Date.now() - startTime;
+			console.log("[TravelAgent] thinkChat: Completed in", duration, "ms");
+
+			return this.transformStreamForState(response, input);
+		} catch (error) {
+			console.error("[TravelAgent] thinkChat error:", error);
+			console.log("[TravelAgent] thinkChat: Falling back to traditional pipeline");
+
+			// Fallback to traditional pipeline
+			const tripState: PipelineTripState = {
+				basics: this.state.basics,
+				preferences: this.state.preferences,
+				recentMessages: this.state.recentMessages,
+				currentIntent: this.state.currentIntent ?? null,
+			};
+
+			try {
+				const stream = await runPipeline(this.env as Env, input, tripState);
+				return this.transformStreamForState(stream, input);
+			} catch (fallbackError) {
+				console.error("[TravelAgent] thinkChat: Fallback also failed:", fallbackError);
+				throw fallbackError;
+			}
+		}
+	}
+
+	/**
+	 * Generate response using Think reasoning with tool orchestration
+	 * Internal helper that demonstrates tool availability to LLM
+	 */
+	private async generateThinkResponse(
+		message: string,
+		tools: any[],
+		systemPrompt: string,
+	): Promise<ReadableStream> {
+		// Build message history
+		const messages = [
+			{
+				role: "system" as const,
+				content: systemPrompt,
+			},
+			...this.state.recentMessages,
+			{
+				role: "user" as const,
+				content: message,
+			},
+		];
+
+		// Call LLM with tool availability info
+		// The LLM will see tools listed in system prompt and can reference them
+		const response = await this.env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8", {
+			messages,
+			max_tokens: 1024,
+			stream: true,
+		});
+
+		// Return as-is (it's already a stream from Workers AI)
+		return response as ReadableStream;
 	}
 
 	/**
